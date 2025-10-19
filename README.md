@@ -60,7 +60,7 @@ Here are the main API routes provided by the server:
 | `POST` | `/api/report-issue` | Submits an issue report from a student to their university. | 
 
 ## 📁 Project Structure
-.
+```
 ├── controllers/      # Logic for handling API requests
 ├── models/           # Mongoose schemas for database models
 ├── routes/           # Express route definitions
@@ -68,6 +68,7 @@ Here are the main API routes provided by the server:
 ├── .gitignore        # Git ignore file
 ├── package.json      # Project dependencies and scripts
 └── server.js         # Main server entry point
+```
 
 ## ⚙️ Environment Variables
 
