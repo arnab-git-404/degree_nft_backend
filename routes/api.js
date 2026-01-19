@@ -15,13 +15,11 @@ router.post('/confirm-nft-credential', nftController.confirmCredential );
 router.post('/report-issue' , nftController.createReport);
 
 
-
 //University Routes
 router.post('/batch-upload', universityController.batchUpload);
 router.get('/get-all-uploaded-data', universityController.getAllUploadedData);
 router.post('/update-nft-allocations/:walletAddress', universityController.updateNftAllocations);
 router.get('/get-reports' , universityController.getAllReports);
-
 
 
 module.exports = router;
