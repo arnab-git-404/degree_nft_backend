@@ -11,6 +11,9 @@ MONGODB_URI=
 # Solana Configuration
 SOLANA_CLUSTER=devnet
 # Admin wallet secret key (Base58 encoded)
+# Comma-separated Solana wallets that should receive the admin role on wallet login
+ADMIN_WALLET_ADDRESSES=
+
 ADMIN_SECRET_KEY=your_base58_encoded_admin_secret_key ( Not in Use )
 
 # API Security
@@ -18,4 +21,9 @@ ADMIN_API_KEY=your_admin_api_key ( Not in Use )
 ADMIN_SECRET_TOKEN=your_admin_secret_token ( Not in Use )
 
 ADMIN_SECRET_TOKEN_EXPIERS_IN=50000 # 5 minutes in seconds
+
+# Authentication
+JWT_SECRET=your_jwt_secret
+JWT_EXPIRES_IN=7d
+AUTH_NONCE_TTL_MINUTES=5
     

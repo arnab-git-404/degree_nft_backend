@@ -1,25 +1,90 @@
-const express = require('express');
-const nftController = require('../controllers/nftController');
-const universityController = require('../controllers/universityController');
-
+import express from "express";
+import * as nftController from "../controllers/nftController.js";
+import * as universityController from "../controllers/universityController.js";
+import authRoutes from "./auth.js";
+import adminRoutes from "./admin.js";
+import { protect, requirePermission } from "../middleware/auth.js";
 
 const router = express.Router();
 
+// Authentication routes
+router.use("/auth", authRoutes);
+
+// Admin routes
+router.use("/admin", adminRoutes);
 
 // NFT routes
-router.post('/create-nft-ipfsHash-allocation', nftController.createNftAllocation);
-router.get('/check-authorization/:walletAddress', nftController.checkAuthorization);
-router.post('/confirm-mint', nftController.confirmMint);
-router.get('/minted-nfts/:walletAddress', nftController.getMintedNfts);
-router.post('/confirm-nft-credential', nftController.confirmCredential );
-router.post('/report-issue' , nftController.createReport);
+router.post(
+  "/create-nft-ipfsHash-allocation",
+  protect,
+  requirePermission("nft:create"),
+  nftController.createNftAllocation
+);
+router.get(
+  "/check-authorization/:walletAddress",
+  protect,
+  requirePermission("nft:read"),
+  nftController.checkAuthorization
+);
+router.post(
+  "/confirm-mint",
+  protect,
+  requirePermission("nft:confirm"),
+  nftController.confirmMint
+);
+router.get(
+  "/minted-nfts/:walletAddress",
+  protect,
+  requirePermission("nft:read"),
+  nftController.getMintedNfts
+);
+router.post(
+  "/confirm-nft-credential",
+  protect,
+  requirePermission("nft:confirm"),
+  nftController.confirmCredential
+);
+router.post(
+  "/report-issue",
+  protect,
+  requirePermission("report:create"),
+  nftController.createReport
+);
 
+// University routes
+router.post(
+  "/university/profile",
+  protect,
+  universityController.createProfile
+);
+router.get(
+  "/university/profile",
+  protect,
+  universityController.getProfile
+);
+router.post(
+  "/batch-upload",
+  protect,
+  requirePermission("batch:upload"),
+  universityController.batchUpload
+);
+router.get(
+  "/get-all-uploaded-data",
+  protect,
+  requirePermission("student:read"),
+  universityController.getAllUploadedData
+);
+router.post(
+  "/update-nft-allocations/:walletAddress",
+  protect,
+  requirePermission("nft:create"),
+  universityController.updateNftAllocations
+);
+router.get(
+  "/get-reports",
+  protect,
+  requirePermission("report:read"),
+  universityController.getAllReports
+);
 
-//University Routes
-router.post('/batch-upload', universityController.batchUpload);
-router.get('/get-all-uploaded-data', universityController.getAllUploadedData);
-router.post('/update-nft-allocations/:walletAddress', universityController.updateNftAllocations);
-router.get('/get-reports' , universityController.getAllReports);
-
-
-module.exports = router;
+export default router;

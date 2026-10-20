@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+import mongoose from "mongoose";
 
 const UniversitySchema = new mongoose.Schema(
   {
@@ -83,4 +83,4 @@ const UniversitySchema = new mongoose.Schema(
 
 UniversitySchema.index({ name: 1 });
 
-module.exports = mongoose.model("University", UniversitySchema);
+export default mongoose.model("University", UniversitySchema);

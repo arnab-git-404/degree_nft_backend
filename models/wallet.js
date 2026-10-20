@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+import mongoose from "mongoose";
 
 const WalletSchema = new mongoose.Schema(
   {
@@ -45,4 +45,4 @@ WalletSchema.index(
   { unique: true, partialFilterExpression: { isPrimary: true } }
 );
 
-module.exports = mongoose.model("Wallet", WalletSchema);
+export default mongoose.model("Wallet", WalletSchema);

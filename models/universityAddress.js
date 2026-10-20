@@ -1,1 +1,1 @@
-module.exports = require("./university");
+export { default } from "./university.js";

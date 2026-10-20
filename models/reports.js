@@ -1,7 +1,6 @@
-const mongoose = require("mongoose");
+import mongoose from "mongoose";
 
 const ReportSchema = new mongoose.Schema({
-    
   universityWallet: {
     type: String,
     required: true,
@@ -34,12 +33,10 @@ const ReportSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-
   reportType: {
     type: String,
     required: true,
   },
-
   reportDetails: {
     type: String,
     required: true,
@@ -57,7 +54,7 @@ const ReportSchema = new mongoose.Schema({
   },
   resolvedDate: {
     type: Date,
-  }
+  },
 });
 
-module.exports = mongoose.model("NFT Reports", ReportSchema);
+export default mongoose.model("NFT Reports", ReportSchema);
