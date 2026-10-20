@@ -10,6 +10,26 @@ const ReportSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  universityId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "University",
+    index: true,
+  },
+  studentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    index: true,
+  },
+  universityWalletId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Wallet",
+    index: true,
+  },
+  studentWalletId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Wallet",
+    index: true,
+  },
   nftIpfsHash: {
     type: String,
     required: true,

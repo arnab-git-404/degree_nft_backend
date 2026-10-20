@@ -26,6 +26,26 @@ const NftSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  universityId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'University',
+    index: true
+  },
+  studentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    index: true
+  },
+  universityWalletId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Wallet',
+    index: true
+  },
+  studentWalletId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Wallet',
+    index: true
+  },
   sellerFeeBasisPoints: {
     type: Number,
     default: 500 // 5% royalty

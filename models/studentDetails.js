@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const StudentDataSchema = new mongoose.Schema({
+const StudentDetailsSchema = new mongoose.Schema({
     studentName: {
         type: String,
         required: true,
@@ -10,6 +10,26 @@ const StudentDataSchema = new mongoose.Schema({
         type: String,
         required: true,
         trim: true
+    },
+    studentId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        index: true
+    },
+    universityId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'University',
+        index: true
+    },
+    studentWalletId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Wallet',
+        index: true
+    },
+    universityWalletId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Wallet',
+        index: true
     },
     studentTotalMintedNFT: {
         type: Number,
@@ -35,5 +55,5 @@ const StudentDataSchema = new mongoose.Schema({
     },
 });
 
-module.exports = mongoose.model('StudentData', StudentDataSchema);
+module.exports = mongoose.model('StudentDetails', StudentDetailsSchema);
 
