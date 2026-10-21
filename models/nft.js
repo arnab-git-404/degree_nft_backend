@@ -16,6 +16,12 @@ const NftSchema = new mongoose.Schema({
     required: true,
     trim: true,
   },
+  ipfsHash: {
+    type: String,
+    required: true,
+    trim: true,
+    index: true,
+  },
   universityWallet: {
     type: String,
     required: true,
