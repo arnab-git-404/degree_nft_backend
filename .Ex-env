@@ -26,4 +26,10 @@ ADMIN_SECRET_TOKEN_EXPIERS_IN=50000 # 5 minutes in seconds
 JWT_SECRET=your_jwt_secret
 JWT_EXPIRES_IN=7d
 AUTH_NONCE_TTL_MINUTES=5
+ACTIVATION_TOKEN_TTL_HOURS=24
+
+# Transactional email (Resend). Without this, activation links are only logged
+# to the server console and returned in development responses.
+RESEND_API_KEY=
+MAIL_FROM=DegreeNFT <onboarding@resend.dev>
     

@@ -23,6 +23,10 @@ export const protect = asyncHandler(async (req, res, next) => {
     throw new AppError("User not found or inactive", 401);
   }
 
+  if (!user.roleId || !user.roleId.isActive) {
+    throw new AppError("Your assigned role is inactive", 403);
+  }
+
   req.user = user;
   next();
 });

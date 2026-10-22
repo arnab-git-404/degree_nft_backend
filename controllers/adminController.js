@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import User from "../models/user.js";
 import Role from "../models/role.js";
 import University from "../models/university.js";
@@ -5,9 +6,80 @@ import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import {
+  PERMISSION_GROUPS,
+  PERMISSION_KEY_SET,
+} from "../utils/permissions.js";
+
+const ROLE_NAME_PATTERN = /^[a-z][a-z0-9_-]{1,31}$/;
 
 const escapeRegex = (value) =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const assertValidRoleId = (roleId) => {
+  if (!mongoose.isValidObjectId(roleId)) {
+    throw new AppError("Role not found", 404);
+  }
+};
+
+const normalizePermissions = (permissions, { allowWildcard = false } = {}) => {
+  if (!Array.isArray(permissions)) {
+    throw new AppError("permissions must be an array", 400);
+  }
+
+  const normalized = [
+    ...new Set(
+      permissions
+        .map((permission) => String(permission).trim())
+        .filter(Boolean)
+    ),
+  ];
+
+  const invalid = normalized.filter((permission) => {
+    if (permission === "*") {
+      return !allowWildcard;
+    }
+
+    return !PERMISSION_KEY_SET.has(permission);
+  });
+
+  if (invalid.length > 0) {
+    throw new AppError(
+      `Unknown or restricted permission: ${invalid.join(", ")}`,
+      400
+    );
+  }
+
+  return normalized.includes("*") ? ["*"] : normalized;
+};
+
+const serializeRole = (role, userCount = 0) => {
+  const value = role.toObject ? role.toObject() : role;
+
+  return {
+    _id: value._id,
+    name: value.name,
+    displayName: value.displayName,
+    description: value.description || "",
+    permissions: value.permissions || [],
+    isSystem: Boolean(value.isSystem),
+    isActive: Boolean(value.isActive),
+    userCount,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  };
+};
+
+const getRoleUserCounts = async (roleIds) => {
+  if (!roleIds.length) return new Map();
+
+  const counts = await User.aggregate([
+    { $match: { roleId: { $in: roleIds } } },
+    { $group: { _id: "$roleId", count: { $sum: 1 } } },
+  ]);
+
+  return new Map(counts.map((entry) => [String(entry._id), entry.count]));
+};
 
 const getPagination = (query) => {
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
@@ -66,11 +138,215 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
 });
 
 export const getRoles = asyncHandler(async (req, res) => {
-  const roles = await Role.find({ isActive: true })
-    .select("name displayName description permissions")
-    .sort({ name: 1 });
+  const includeInactive = req.query.includeInactive === "true";
+  const roles = await Role.find(includeInactive ? {} : { isActive: true })
+    .sort({ isSystem: -1, name: 1 })
+    .lean();
+  const counts = await getRoleUserCounts(roles.map((role) => role._id));
 
-  res.status(200).json({ success: true, roles });
+  res.status(200).json({
+    success: true,
+    roles: roles.map((role) =>
+      serializeRole(role, counts.get(String(role._id)) || 0)
+    ),
+  });
+});
+
+export const getPermissionCatalog = asyncHandler(async (req, res) => {
+  res.status(200).json({
+    success: true,
+    groups: PERMISSION_GROUPS,
+    total: PERMISSION_KEY_SET.size,
+  });
+});
+
+export const getRoleUsers = asyncHandler(async (req, res) => {
+  assertValidRoleId(req.params.roleId);
+
+  const role = await Role.findById(req.params.roleId);
+
+  if (!role) {
+    throw new AppError("Role not found", 404);
+  }
+
+  const { page, limit, skip } = getPagination(req.query);
+  const search = String(req.query.search || "").trim();
+  const filter = { roleId: role._id };
+
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+    filter.$or = [{ name: regex }, { email: regex }];
+  }
+
+  const [users, total] = await Promise.all([
+    User.find(filter)
+      .select("name email isActive createdAt lastLoginAt")
+      .populate("primaryWallet", "address")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    User.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    users,
+    pagination: paginationMeta(page, limit, total),
+  });
+});
+
+export const createRole = asyncHandler(async (req, res) => {
+  const name = String(req.body.name || "").trim().toLowerCase();
+  const displayName = String(req.body.displayName || "").trim();
+  const description = String(req.body.description || "").trim();
+  const permissions = normalizePermissions(req.body.permissions || []);
+  const isActive = req.body.isActive ?? true;
+
+  if (!ROLE_NAME_PATTERN.test(name)) {
+    throw new AppError(
+      "name must start with a letter and contain only lowercase letters, numbers, hyphens, or underscores",
+      400
+    );
+  }
+
+  if (!displayName) {
+    throw new AppError("displayName is required", 400);
+  }
+
+  if (typeof isActive !== "boolean") {
+    throw new AppError("isActive must be a boolean", 400);
+  }
+
+  const existingRole = await Role.findOne({ name });
+
+  if (existingRole) {
+    throw new AppError("A role with this name already exists", 409);
+  }
+
+  const role = await Role.create({
+    name,
+    displayName,
+    description,
+    permissions,
+    isActive,
+    isSystem: false,
+  });
+
+  res.status(201).json({
+    success: true,
+    role: serializeRole(role),
+  });
+});
+
+export const updateRole = asyncHandler(async (req, res) => {
+  assertValidRoleId(req.params.roleId);
+
+  const role = await Role.findById(req.params.roleId);
+
+  if (!role) {
+    throw new AppError("Role not found", 404);
+  }
+
+  const { displayName, description, permissions, isActive } = req.body;
+
+  if (displayName !== undefined) {
+    const nextDisplayName = String(displayName).trim();
+
+    if (!nextDisplayName) {
+      throw new AppError("displayName cannot be empty", 400);
+    }
+
+    role.displayName = nextDisplayName;
+  }
+
+  if (description !== undefined) {
+    role.description = String(description).trim();
+  }
+
+  if (permissions !== undefined) {
+    if (role.name === "admin") {
+      const normalized = normalizePermissions(permissions, {
+        allowWildcard: true,
+      });
+
+      if (!normalized.includes("*")) {
+        throw new AppError(
+          "The admin role must retain full access to every permission",
+          400
+        );
+      }
+
+      role.permissions = ["*"];
+    } else {
+      role.permissions = normalizePermissions(permissions);
+    }
+  }
+
+  if (isActive !== undefined) {
+    if (typeof isActive !== "boolean") {
+      throw new AppError("isActive must be a boolean", 400);
+    }
+
+    if (!isActive) {
+      if (role.isSystem) {
+        throw new AppError("System roles cannot be deactivated", 400);
+      }
+
+      const assignedUsers = await User.countDocuments({ roleId: role._id });
+
+      if (assignedUsers > 0) {
+        throw new AppError(
+          `Reassign ${assignedUsers} user${
+            assignedUsers === 1 ? "" : "s"
+          } before deactivating this role`,
+          400
+        );
+      }
+    }
+
+    role.isActive = isActive;
+  }
+
+  await role.save();
+
+  const userCount = await User.countDocuments({ roleId: role._id });
+
+  res.status(200).json({
+    success: true,
+    role: serializeRole(role, userCount),
+  });
+});
+
+export const deleteRole = asyncHandler(async (req, res) => {
+  assertValidRoleId(req.params.roleId);
+
+  const role = await Role.findById(req.params.roleId);
+
+  if (!role) {
+    throw new AppError("Role not found", 404);
+  }
+
+  if (role.isSystem) {
+    throw new AppError("System roles cannot be deleted", 400);
+  }
+
+  const assignedUsers = await User.countDocuments({ roleId: role._id });
+
+  if (assignedUsers > 0) {
+    throw new AppError(
+      `Reassign ${assignedUsers} user${
+        assignedUsers === 1 ? "" : "s"
+      } before deleting this role`,
+      400
+    );
+  }
+
+  await role.deleteOne();
+
+  res.status(200).json({
+    success: true,
+    message: "Role deleted",
+  });
 });
 
 export const getUsers = asyncHandler(async (req, res) => {

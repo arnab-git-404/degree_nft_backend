@@ -33,6 +33,30 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    activationTokenHash: {
+      type: String,
+      select: false,
+    },
+    activationExpiresAt: {
+      type: Date,
+      select: false,
+    },
+    phone: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    bio: {
+      type: String,
+      trim: true,
+      maxlength: 280,
+      default: "",
+    },
+    avatarUrl: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     lastLoginAt: {
       type: Date,
     },
