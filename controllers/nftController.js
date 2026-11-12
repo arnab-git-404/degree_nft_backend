@@ -1,327 +1,453 @@
-const NFT = require("../models/nft");
-const Reports = require("../models/reports");
+import NFT from "../models/nft.js";
+import Reports from "../models/reports.js";
+import University from "../models/university.js";
+import Wallet from "../models/wallet.js";
+import StudentDetails from "../models/studentDetails.js";
+import AppError from "../utils/AppError.js";
+import asyncHandler from "../utils/asyncHandler.js";
+import { isValidSolanaAddress } from "../utils/solanaAuth.js";
+import { findOrCreateUserByWallet } from "../services/userWalletService.js";
 
-// Create an NFT allocation for a specific wallet
-exports.createNftAllocation = async (req, res) => {
-  try {
-    const {
-      studentWallet, // Assuming this is the primary recipient wallet
-      universityWallet,
-      name,
-      symbol,
-      uri,
-      ipfsHash,
-      sellerFeeBasisPoints,
-    } = req.body;
-
-    if (
-      !studentWallet ||
-      !universityWallet ||
-      !name ||
-      !symbol ||
-      !uri ||
-      !ipfsHash
-    ) {
-      return res
-        .status(400)
-        .json({ error: "Missing required fields for NFT allocation" });
+const getStudentWallet = async (user, walletAddress) => {
+  if (walletAddress) {
+    if (!isValidSolanaAddress(walletAddress)) {
+      throw new AppError("Invalid Solana wallet address", 400);
     }
 
-    const existingAllocation = await NFT.findOne({
-      studentWallet,
-      universityWallet,
-      ipfsHash,
+    const wallet = await Wallet.findOne({
+      chain: "solana",
+      address: walletAddress,
+      userId: user._id,
     });
 
-    if (existingAllocation) {
-      return res
-        .status(409)
-        .json({ error: "NFT allocation already exists for this combination" });
+    if (wallet) {
+      return wallet;
     }
 
-    // Create a new NFT document using the Mongoose model
-    const newNftAllocation = new NFT({
-      name,
-      symbol,
-      uri,
-      ipfsHash,
-      universityWallet,
-      studentWallet,
-      sellerFeeBasisPoints, // Will use schema default if not provided
-      allocated: true, // Set allocated to true
-      allocatedAt: new Date(), // Set allocation timestamp
-      minted: false, // Initially not minted
-    });
-
-    // Save the new allocation to the database
-    const savedAllocation = await newNftAllocation.save();
-
-    console.log(
-      `NFT allocation saved to DB for student wallet: ${studentWallet}`,
-    );
-
-    res.status(201).json({
-      success: true,
-      message: "NFT allocation created successfully in database",
-      allocation: savedAllocation,
-    });
-  } catch (error) {
-    console.error("Error allocating NFT:", error);
-    res.status(500).json({ error: "Failed to allocate NFT" });
-  }
-};
-
-exports.confirmCredential = async (req, res) => {
-  const { walletAddress } = req.body;
-
-  try {
-    const nft = await NFT.findOne({
-      studentWallet: walletAddress,
-      allocated: true,
-      minted: false,
-    });
-
-    if (!nft) {
-      return res.status(404).json({ error: "NFT allocation not found" });
-    }
-
-    nft.nftStatus = "CONFIRMED";
-    nft.isConfirmed = true;
-    nft.confirmedAt = new Date();
-
-    await nft.save();
-
-    res.status(200).json({
-      success: true,
-      message: "NFT Detalis are confirmed ",
-    });
-  } catch (error) {
-    res.status(500).json({ "Failed to Confirm NFT Data": error });
-  }
-};
-
-// exports.checkAuthorization = async (req, res) => {
-
-//   const { walletAddress } = req.params; // Assuming this is the studentWallet
-
-//   try {
-//     const allocation = await NFT.findOne({ studentWallet: walletAddress });
-
-//     const existingReport = await Reports.findOne({ studentWallet: walletAddress });
-
-//     if (allocation && allocation.allocated && !allocation.minted ) {
-
-//       res.status(200).json({
-//         authorized: true,
-//         existingReport: existingReport ? true : false, // Check if a report exists for this wallet
-//         nftInfo: {
-//           // Send relevant info needed for minting
-//           _id: allocation._id, // Send DB id if needed later
-//           name: allocation.name,
-//           symbol: allocation.symbol,
-//           uri: allocation.uri,
-//           confirmationStatus : allocation.nftStatus,
-//           sellerFeeBasisPoints: allocation.sellerFeeBasisPoints,
-//         },
-
-//       });
-
-//     } else if (allocation && allocation.minted) {
-
-//       res.status(200).json({
-//         authorized: false,
-//         message: "All NFT has already been minted for this wallet",
-//       });
-
-//     } else {
-//       res.status(200).json({
-//         authorized: false,
-//         message: "No NFT allocation found for this wallet",
-//       });
-//     }
-
-//     console.log("Authorization api hit ");
-//   } catch (error) {
-//     console.error("Error checking authorization:", error);
-//     res.status(500).json({ error: "Failed to check authorization" });
-//   }
-// };
-
-exports.checkAuthorization = async (req, res) => {
-  const { walletAddress } = req.params; // Assuming this is the studentWallet
-  let authorizedStatus = false; // For logging
-
-  try {
-    // Check for an NFT that is allocated but not yet minted for this wallet
-    const unmintedAllocation = await NFT.findOne({
-      studentWallet: walletAddress,
-      allocated: true,
-      minted: false,
-    }).sort({ allocatedAt: 1 }); // Optional: sort to get the oldest unminted one first
-
-    const existingReport = await Reports.findOne({
-      studentWallet: walletAddress,
-    });
-
-    if (unmintedAllocation) {
-      // An unminted NFT is available for this wallet
-      authorizedStatus = true;
-      res.status(200).json({
-        authorized: true,
-        existingReport: existingReport ? true : false,
-        nftInfo: {
-          // Send relevant info needed for minting this specific NFT
-          _id: unmintedAllocation._id, // Send DB id, crucial for targeting in confirmMint if you adapt it
-          name: unmintedAllocation.name,
-          symbol: unmintedAllocation.symbol,
-          uri: unmintedAllocation.uri,
-          confirmationStatus: unmintedAllocation.nftStatus,
-          sellerFeeBasisPoints: unmintedAllocation.sellerFeeBasisPoints,
-        },
-      });
-    } else {
-      // No unminted NFT found. Check if any NFT exists for this wallet to determine the reason.
-      const anyAllocationForWallet = await NFT.findOne({
-        studentWallet: walletAddress,
+    if (user.roleId?.name === "admin") {
+      const anyWallet = await Wallet.findOne({
+        chain: "solana",
+        address: walletAddress,
       });
 
-      if (anyAllocationForWallet) {
-        // NFTs exist for this wallet, but none are currently in the 'allocated: true, minted: false' state.
-        // This implies all allocated NFTs are already minted, or there are no NFTs ready for minting.
-        res.status(200).json({
-          authorized: false,
-          existingReport: existingReport ? true : false,
-          message:
-            "All NFTs have already been minted for this wallet, or no new NFTs are ready for minting.",
-        });
-      } else {
-        // No NFT allocations (neither minted nor unminted) found for this wallet at all.
-        res.status(200).json({
-          authorized: false,
-          existingReport: existingReport ? true : false,
-          message: "No NFT allocation found for this wallet.",
-        });
-      }
-    }
-    console.log(
-      `Authorization check for wallet: ${walletAddress}. Authorized: ${authorizedStatus}`,
-    );
-  } catch (error) {
-    console.error("Error checking authorization:", error);
-    res.status(500).json({ error: "Failed to check authorization" });
-  }
-};
-
-exports.confirmMint = async (req, res) => {
-  const { walletAddress, nft_Mint_Address } = req.body; // Assuming this is studentWallet
-
-  try {
-    // 1. Find the allocation in the database
-    const allocation = await NFT.findOne({
-      studentWallet: walletAddress,
-      allocated: true,
-      minted: false,
-    });
-
-    if (!allocation) {
-      return res.status(403).json({
-        error: "Wallet not authorized or NFT already minted/not allocated",
-      });
+      return anyWallet || { address: walletAddress, _id: null, userId: null };
     }
 
-    // 4. Update the allocation document in the database
-    allocation.nftStatus = "MINTED";
-    allocation.minted = true;
-    allocation.mintedAt = new Date();
-    allocation.nftAddress = nft_Mint_Address; // Store the minted NFT address
-
-    await allocation.save();
-
-    res.status(200).json({
-      success: true,
-      message: "NFT Data Saved Successfully",
-    });
-  } catch (error) {
-    console.error("Error minting NFT:", error);
-    // If minting failed, ensure the DB status isn't incorrectly updated
-    res.status(500).json({ error: "Failed to mint NFT: " + error.message });
+    throw new AppError("Wallet is not linked to your account", 403);
   }
+
+  const wallet = await Wallet.findOne({ userId: user._id }).sort({
+    isPrimary: -1,
+    createdAt: 1,
+  });
+
+  if (!wallet) {
+    throw new AppError("No wallet is linked to this account", 400);
+  }
+
+  return wallet;
 };
 
-// Get all minted NFTs (update to query DB)
-exports.getMintedNfts = async (req, res) => {
-  const { walletAddress } = req.params;
+const walletFilter = (wallet) => {
+  const conditions = [{ studentWallet: wallet.address }];
 
-  try {
-    // const mintedNfts = await NFT.find({ minted: true, studentWallet: walletAddress }); // Find all documents where minted is true for the specific wallet
-
-    // res.status(200).json({ nfts: mintedNfts });
-
-    const mintedNftsFromDb = await NFT.find({
-      minted: true,
-      studentWallet: walletAddress,
-    });
-
-    const formattedNfts = mintedNftsFromDb.map((nft, index) => ({
-      id: index + 1, // Adding a 1-based index
-      name: nft.name,
-      issueDate: nft.allocatedAt, // Assuming allocatedAt is the issue date
-      mintedDate: nft.mintedAt,
-      nftAddress: nft.nftAddress, // Optionally include other relevant fields
-      symbol: nft.symbol,
-      uri: nft.uri,
-    }));
-
-    res.status(200).json({ nfts: formattedNfts });
-  } catch (error) {
-    console.error("Error fetching minted NFTs:", error);
-    res.status(500).json({ error: "Failed to fetch minted NFTs" });
+  if (wallet._id) {
+    conditions.push({ studentWalletId: wallet._id });
   }
+
+  return { $or: conditions };
 };
 
-exports.createReport = async (req, res) => {
+const resolveUniversityReferences = async (nft) => {
+  let universityId = nft.universityId;
+  let universityWalletId = nft.universityWalletId;
+
+  if (!universityId && nft.universityWallet) {
+    const university = await University.findOne({
+      walletAddress: nft.universityWallet,
+    });
+
+    if (university) {
+      universityId = university._id;
+    }
+  }
+
+  if (!universityWalletId && nft.universityWallet) {
+    const wallet = await Wallet.findOne({
+      chain: "solana",
+      address: nft.universityWallet,
+    });
+
+    if (wallet) {
+      universityWalletId = wallet._id;
+    }
+  }
+
+  return { universityId, universityWalletId };
+};
+
+export const createNftAllocation = asyncHandler(async (req, res) => {
   const {
-    universityWallet,
     studentWallet,
+    name,
+    symbol,
+    uri,
+    ipfsHash,
+    sellerFeeBasisPoints,
+  } = req.body;
+
+  if (!studentWallet || !name || !symbol || !uri || !ipfsHash) {
+    throw new AppError("Missing required fields for NFT allocation", 400);
+  }
+
+  if (!isValidSolanaAddress(studentWallet)) {
+    throw new AppError("Invalid student wallet address", 400);
+  }
+
+  let university;
+
+  if (req.user.roleId?.name === "admin" && req.body.universityId) {
+    university = await University.findById(req.body.universityId);
+  } else {
+    university = await University.findOne({ userId: req.user._id });
+  }
+
+  if (!university) {
+    throw new AppError(
+      "University profile not found. Create a university profile first.",
+      400
+    );
+  }
+
+  const existingAllocation = await NFT.findOne({
+    ipfsHash,
+    studentWallet,
+    $or: [
+      { universityId: university._id },
+      { universityWallet: university.walletAddress },
+    ],
+  });
+
+  if (existingAllocation) {
+    throw new AppError(
+      "NFT allocation already exists for this combination",
+      409
+    );
+  }
+
+  const { user: student, wallet: studentWalletDocument } =
+    await findOrCreateUserByWallet(studentWallet);
+
+  const universityWallet = await Wallet.findOne({
+    chain: "solana",
+    address: university.walletAddress,
+  });
+
+  if (universityWallet && !university.walletId) {
+    university.walletId = universityWallet._id;
+    await university.save();
+  }
+
+  const allocation = await NFT.create({
+    name,
+    symbol,
+    uri,
+    ipfsHash,
+    universityWallet: university.walletAddress,
+    studentWallet,
+    universityId: university._id,
+    studentId: student._id,
+    universityWalletId: universityWallet?._id,
+    studentWalletId: studentWalletDocument._id,
+    sellerFeeBasisPoints,
+    allocated: true,
+    allocatedAt: new Date(),
+    minted: false,
+  });
+
+  await StudentDetails.findOneAndUpdate(
+    { universityId: university._id, studentId: student._id },
+    {
+      $setOnInsert: {
+        studentName: student.name,
+        studentWalletAddress: studentWallet,
+        studentId: student._id,
+        universityId: university._id,
+        studentWalletId: studentWalletDocument._id,
+        universityWalletId: universityWallet?._id,
+        universityWalletAddress: university.walletAddress,
+        universityName: university.name,
+      },
+      $inc: { totalAllocatedNFTs: 1 },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  await University.updateOne(
+    { _id: university._id },
+    { $inc: { totalAllocated: 1 } }
+  );
+
+  res.status(201).json({
+    success: true,
+    message: "NFT allocation created successfully in database",
+    allocation,
+  });
+});
+
+export const checkAuthorization = asyncHandler(async (req, res) => {
+  const { walletAddress } = req.params;
+  const wallet = await getStudentWallet(req.user, walletAddress);
+
+  const unmintedAllocation = await NFT.findOne({
+    allocated: true,
+    minted: false,
+    ...walletFilter(wallet),
+  })
+    .sort({ allocatedAt: 1 })
+    .populate("universityId", "name code walletAddress");
+
+  const existingReport = await Reports.findOne(walletFilter(wallet));
+
+  if (unmintedAllocation) {
+    res.status(200).json({
+      authorized: true,
+      existingReport: Boolean(existingReport),
+      nftInfo: {
+        _id: unmintedAllocation._id,
+        name: unmintedAllocation.name,
+        symbol: unmintedAllocation.symbol,
+        uri: unmintedAllocation.uri,
+        ipfsHash: unmintedAllocation.ipfsHash,
+        confirmationStatus: unmintedAllocation.nftStatus,
+        sellerFeeBasisPoints: unmintedAllocation.sellerFeeBasisPoints,
+        universityName: unmintedAllocation.universityId?.name || null,
+      },
+    });
+    return;
+  }
+
+  const anyAllocation = await NFT.findOne(walletFilter(wallet));
+
+  if (anyAllocation) {
+    res.status(200).json({
+      authorized: false,
+      existingReport: Boolean(existingReport),
+      message:
+        "All NFTs have already been minted for this wallet, or no new NFTs are ready for minting.",
+    });
+    return;
+  }
+
+  res.status(200).json({
+    authorized: false,
+    existingReport: Boolean(existingReport),
+    message: "No NFT allocation found for this wallet.",
+  });
+});
+
+export const confirmCredential = asyncHandler(async (req, res) => {
+  const { walletAddress, nftId } = req.body;
+  const wallet = await getStudentWallet(req.user, walletAddress);
+
+  const filter = {
+    allocated: true,
+    minted: false,
+    ...walletFilter(wallet),
+  };
+
+  if (nftId) {
+    filter._id = nftId;
+  }
+
+  const nft = await NFT.findOne(filter).sort({ allocatedAt: 1 });
+
+  if (!nft) {
+    throw new AppError("NFT allocation not found", 404);
+  }
+
+  if (!nft.studentId && wallet.userId) {
+    nft.studentId = wallet.userId;
+  }
+
+  if (!nft.studentWalletId && wallet._id) {
+    nft.studentWalletId = wallet._id;
+  }
+
+  nft.nftStatus = "CONFIRMED";
+  nft.isConfirmed = true;
+  nft.confirmedAt = new Date();
+
+  await nft.save();
+
+  res.status(200).json({
+    success: true,
+    message: "NFT details are confirmed",
+  });
+});
+
+export const confirmMint = asyncHandler(async (req, res) => {
+  const { walletAddress, nft_Mint_Address, nftId } = req.body;
+
+  if (!nft_Mint_Address || !isValidSolanaAddress(nft_Mint_Address)) {
+    throw new AppError("A valid nft_Mint_Address is required", 400);
+  }
+
+  const wallet = await getStudentWallet(req.user, walletAddress);
+
+  const filter = {
+    allocated: true,
+    minted: false,
+    ...walletFilter(wallet),
+  };
+
+  if (nftId) {
+    filter._id = nftId;
+  }
+
+  const allocation = await NFT.findOne(filter).sort({ allocatedAt: 1 });
+
+  if (!allocation) {
+    throw new AppError(
+      "Wallet not authorized or NFT already minted/not allocated",
+      403
+    );
+  }
+
+  if (!allocation.studentId && wallet.userId) {
+    allocation.studentId = wallet.userId;
+  }
+
+  if (!allocation.studentWalletId && wallet._id) {
+    allocation.studentWalletId = wallet._id;
+  }
+
+  const { universityId, universityWalletId } =
+    await resolveUniversityReferences(allocation);
+
+  if (!allocation.universityId && universityId) {
+    allocation.universityId = universityId;
+  }
+
+  if (!allocation.universityWalletId && universityWalletId) {
+    allocation.universityWalletId = universityWalletId;
+  }
+
+  allocation.nftStatus = "MINTED";
+  allocation.minted = true;
+  allocation.mintedAt = new Date();
+  allocation.nftAddress = nft_Mint_Address;
+
+  await allocation.save();
+
+  if (allocation.universityId) {
+    await University.updateOne(
+      { _id: allocation.universityId },
+      { $inc: { totalMinted: 1 } }
+    );
+  }
+
+  if (allocation.universityId && allocation.studentId) {
+    await StudentDetails.updateOne(
+      {
+        universityId: allocation.universityId,
+        studentId: allocation.studentId,
+      },
+      { $inc: { studentTotalMintedNFT: 1 } }
+    );
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "NFT data saved successfully",
+  });
+});
+
+export const getMintedNfts = asyncHandler(async (req, res) => {
+  const { walletAddress } = req.params;
+  const wallet = await getStudentWallet(req.user, walletAddress);
+
+  const mintedNfts = await NFT.find({
+    minted: true,
+    ...walletFilter(wallet),
+  })
+    .sort({ mintedAt: -1 })
+    .populate("universityId", "name code walletAddress");
+
+  const formattedNfts = mintedNfts.map((nft, index) => ({
+    id: index + 1,
+    nftId: nft._id,
+    name: nft.name,
+    issueDate: nft.allocatedAt,
+    mintedDate: nft.mintedAt,
+    nftAddress: nft.nftAddress,
+    symbol: nft.symbol,
+    uri: nft.uri,
+    ipfsHash: nft.ipfsHash,
+    universityName: nft.universityId?.name || null,
+  }));
+
+  res.status(200).json({ nfts: formattedNfts });
+});
+
+export const createReport = asyncHandler(async (req, res) => {
+  const {
+    walletAddress,
     nftIpfsHash,
     reportType,
     reportDetails,
   } = req.body;
 
-  try {
-    if (!universityWallet || !studentWallet || !reportType || !reportDetails) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
+  const studentWalletAddress = req.body.studentWallet || walletAddress;
 
-    // Check if the report already exists
-    const existingReport = await Reports.findOne({
-      studentWallet,
-      reportType,
-    });
-
-    if (existingReport) {
-      return res.status(409).json({ error: "Report already exists" });
-    }
-
-    // Create a new report document
-    const newReport = new Reports({
-      universityWallet,
-      studentWallet,
-      nftIpfsHash,
-      reportType,
-      reportDetails,
-      reportedOn: new Date(),
-    });
-
-    // Save the new report to the database
-    const savedReport = await newReport.save();
-
-    res.status(201).json({
-      success: true,
-      message: "Report created successfully",
-    });
-  } catch (error) {
-    console.error("Error creating report:", error);
-    res.status(500).json({ error: "Failed to create report" });
+  if (!nftIpfsHash || !reportType || !reportDetails) {
+    throw new AppError("Missing required fields", 400);
   }
-};
+
+  const wallet = await getStudentWallet(req.user, studentWalletAddress);
+
+  const nft = await NFT.findOne({
+    $and: [
+      {
+        $or: [{ ipfsHash: nftIpfsHash }, { uri: nftIpfsHash }],
+      },
+      walletFilter(wallet),
+    ],
+  });
+
+  if (!nft) {
+    throw new AppError("No matching NFT was found for this report", 404);
+  }
+
+  const existingReport = await Reports.findOne({
+    nftIpfsHash,
+    reportType,
+    ...walletFilter(wallet),
+  });
+
+  if (existingReport) {
+    throw new AppError("Report already exists", 409);
+  }
+
+  const { universityId, universityWalletId } =
+    await resolveUniversityReferences(nft);
+
+  const report = await Reports.create({
+    universityWallet: nft.universityWallet,
+    studentWallet: wallet.address,
+    universityId: universityId || undefined,
+    studentId: nft.studentId || wallet.userId || req.user._id,
+    universityWalletId: universityWalletId || undefined,
+    studentWalletId: nft.studentWalletId || wallet._id || undefined,
+    nftIpfsHash,
+    reportType,
+    reportDetails,
+    reportedOn: new Date(),
+  });
+
+  res.status(201).json({
+    success: true,
+    message: "Report created successfully",
+    report,
+  });
+});

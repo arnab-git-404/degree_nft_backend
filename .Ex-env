@@ -12,10 +12,26 @@ MONGODB_URI=
 SOLANA_CLUSTER=devnet
 # Admin wallet secret key (Base58 encoded)
 ADMIN_SECRET_KEY=your_base58_encoded_admin_secret_key ( Not in Use )
+JWT_SECRET=your_jwt_secret_key ( Not in Use )
 
 # API Security
 ADMIN_API_KEY=your_admin_api_key ( Not in Use )
 ADMIN_SECRET_TOKEN=your_admin_secret_token ( Not in Use )
-
 ADMIN_SECRET_TOKEN_EXPIERS_IN=50000 # 5 minutes in seconds
+
+# Authentication
+
+JWT_EXPIRES_IN=7d
+AUTH_NONCE_TTL_MINUTES=5
+ACTIVATION_TOKEN_TTL_HOURS=24
+
+# Transactional email (Resend). Without this, activation links are only logged
+# to the server console and returned in development responses.
+# Not Implemented Yet
+RESEND_API_KEY=
+MAIL_FROM=DegreeNFT <onboarding@resend.dev>
     
+ADMIN_NAME=Arnab Mukherjee
+ADMIN_EMAIL=
+ADMIN_PASSWORD=
+ADMIN_WALLET_ADDRESSES=
