@@ -1,5 +1,6 @@
 import express from "express";
 import * as adminController from "../controllers/adminController.js";
+import * as registrationController from "../controllers/registrationController.js";
 import {
   protect,
   authorize,
@@ -31,11 +32,19 @@ router.patch(
 
 router.get("/nfts", adminController.getNftAllocations);
 
+router.get("/registration-links", registrationController.getRegistrationLinks);
+router.post("/registration-links", registrationController.createRegistrationLink);
+router.patch(
+  "/registration-links/:linkId",
+  registrationController.updateRegistrationLink
+);
+
 router.get(
   "/reports",
   requirePermission("report:read"),
   adminController.getReports
 );
+
 router.patch(
   "/reports/:reportId/resolve",
   requirePermission("report:resolve"),
