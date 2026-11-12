@@ -36,6 +36,7 @@ router.get(
   requirePermission("report:read"),
   adminController.getReports
 );
+
 router.patch(
   "/reports/:reportId/resolve",
   requirePermission("report:resolve"),
