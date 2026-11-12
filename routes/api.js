@@ -1,6 +1,7 @@
 import express from "express";
 import * as nftController from "../controllers/nftController.js";
 import * as universityController from "../controllers/universityController.js";
+import * as registrationController from "../controllers/registrationController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
 import { protect, requirePermission } from "../middleware/auth.js";
@@ -12,6 +13,13 @@ router.use("/auth", authRoutes);
 
 // Admin routes
 router.use("/admin", adminRoutes);
+
+// Public university registration (no login: applicants have no account yet)
+router.get("/registration/:token", registrationController.getPublicLink);
+router.post(
+  "/registration/:token/apply",
+  registrationController.submitApplication
+);
 
 // NFT routes
 router.post(

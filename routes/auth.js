@@ -5,7 +5,6 @@ import { protect } from "../middleware/auth.js";
 const router = express.Router();
 
 router.post("/nonce", authController.requestNonce);
-router.post("/register", authController.register);
 router.post("/activate/resend", authController.resendActivation);
 router.post("/activate/:token", authController.activateAccount);
 router.post("/activate", authController.activateAccount);

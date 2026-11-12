@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import User from "../models/user.js";
-import Role from "../models/role.js";
 import Wallet from "../models/wallet.js";
 import AuthNonce from "../models/authNonce.js";
 import AppError from "../utils/AppError.js";
@@ -31,16 +30,6 @@ const getAdminWalletAddresses = () =>
     .flatMap((value) => String(value).split(","))
     .map((address) => address.trim())
     .filter(Boolean);
-
-const findRole = async (name) => {
-  const role = await Role.findOne({ name, isActive: true });
-
-  if (!role) {
-    throw new AppError(`Role '${name}' is not configured`, 500);
-  }
-
-  return role;
-};
 
 const consumeNonce = async ({
   walletAddress,
@@ -169,9 +158,21 @@ export const walletLogin = asyncHandler(async (req, res) => {
 
   await consumeNonce({ walletAddress, signature, signatureEncoding });
 
-  const roleName = getAdminWalletAddresses().includes(walletAddress)
-    ? "admin"
-    : undefined;
+  const isAdminWallet = getAdminWalletAddresses().includes(walletAddress);
+
+  // No self-signup: only wallets already on an account (or configured admin wallets) may sign in.
+  if (
+    !isAdminWallet &&
+    !(await Wallet.exists({ chain: "solana", address: walletAddress }))
+  ) {
+    throw new AppError(
+      "This wallet is not registered with DegreeNFT.",
+      403,
+      "WALLET_NOT_REGISTERED"
+    );
+  }
+
+  const roleName = isAdminWallet ? "admin" : undefined;
   const { user, wallet } = await findOrCreateUserByWallet(walletAddress, {
     name,
     verified: true,
@@ -195,54 +196,6 @@ export const walletLogin = asyncHandler(async (req, res) => {
     success: true,
     token: signToken(user),
     user: user.toJSON(),
-  });
-});
-
-export const register = asyncHandler(async (req, res) => {
-  const { name, email, password } = req.body;
-  const roleName = req.body.role || "student";
-
-  if (!name || !email || !password) {
-    throw new AppError("name, email and password are required", 400);
-  }
-
-  if (!/^\S+@\S+\.\S+$/.test(email)) {
-    throw new AppError("Please provide a valid email address", 400);
-  }
-
-  if (String(password).length < 8) {
-    throw new AppError("Password must be at least 8 characters long", 400);
-  }
-
-  if (!["student", "university"].includes(roleName)) {
-    throw new AppError("role must be either student or university", 400);
-  }
-
-  const normalizedEmail = normalizeEmail(email);
-  const existingUser = await User.findOne({ email: normalizedEmail });
-
-  if (existingUser) {
-    throw new AppError("Email is already registered", 409);
-  }
-
-  const role = await findRole(roleName);
-  const passwordHash = await bcrypt.hash(password, 12);
-  const user = await User.create({
-    name: String(name).trim(),
-    email: normalizedEmail,
-    passwordHash,
-    roleId: role._id,
-  });
-
-  const activation = await issueActivation(user);
-  await populateUser(user);
-
-  res.status(201).json({
-    success: true,
-    message:
-      "Account created. We sent an activation link to your email address.",
-    user: user.toJSON(),
-    ...activationPayload(activation),
   });
 });
 
