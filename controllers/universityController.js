@@ -1,29 +1,8 @@
 import University from "../models/university.js";
 import Wallet from "../models/wallet.js";
-import Role from "../models/role.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { backfillUniversityReferences } from "../services/userWalletService.js";
-
-const ensureUniversityRole = async (user) => {
-  const currentRole = user.roleId?.name;
-
-  if (currentRole === "university" || currentRole === "admin") {
-    return;
-  }
-
-  const universityRole = await Role.findOne({
-    name: "university",
-    isActive: true,
-  });
-
-  if (!universityRole) {
-    throw new AppError("Role 'university' is not configured", 500);
-  }
-
-  user.roleId = universityRole._id;
-  await user.save();
-};
 
 export const createProfile = asyncHandler(async (req, res) => {
   const {
@@ -41,9 +20,6 @@ export const createProfile = asyncHandler(async (req, res) => {
   const existingProfile = await University.findOne({ userId: req.user._id });
 
   if (existingProfile) {
-    await ensureUniversityRole(req.user);
-    await req.user.populate("roleId");
-
     res.status(200).json({
       success: true,
       university: existingProfile,
@@ -103,8 +79,6 @@ export const createProfile = asyncHandler(async (req, res) => {
     accreditation,
   });
 
-  await ensureUniversityRole(req.user);
-  await req.user.populate("roleId");
   await backfillUniversityReferences(profile, wallet);
 
   res.status(201).json({

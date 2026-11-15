@@ -6,6 +6,7 @@ import StudentDetails from "../models/studentDetails.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
+import { verifyCredentialMint } from "../utils/solana.js";
 import { findOrCreateUserByWallet } from "../services/userWalletService.js";
 
 const getStudentWallet = async (user, walletAddress) => {
@@ -116,6 +117,13 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     throw new AppError(
       "University profile not found. Create a university profile first.",
       400
+    );
+  }
+
+  if (university.verificationStatus !== "VERIFIED" || !university.isActive) {
+    throw new AppError(
+      "University must be verified and active before issuing credentials",
+      403
     );
   }
 
@@ -286,6 +294,37 @@ export const confirmCredential = asyncHandler(async (req, res) => {
   });
 });
 
+// Pins credential metadata server-side so Pinata keys never reach the browser.
+export const pinMetadata = asyncHandler(async (req, res) => {
+  const metadata = req.body;
+
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || !metadata.name) {
+    throw new AppError("Metadata JSON with a name is required", 400);
+  }
+
+  if (!process.env.PINATA_API_KEY || !process.env.PINATA_API_SECRET) {
+    throw new AppError("IPFS pinning is not configured on the server", 503);
+  }
+
+  const response = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      pinata_api_key: process.env.PINATA_API_KEY,
+      pinata_secret_api_key: process.env.PINATA_API_SECRET,
+    },
+    body: JSON.stringify(metadata),
+  });
+
+  if (!response.ok) {
+    console.error("Pinata pin failed:", response.status, await response.text());
+    throw new AppError("Failed to upload metadata to IPFS", 502);
+  }
+
+  const { IpfsHash } = await response.json();
+  res.status(200).json({ success: true, IpfsHash });
+});
+
 export const confirmMint = asyncHandler(async (req, res) => {
   const { walletAddress, nft_Mint_Address, nftId } = req.body;
 
@@ -312,6 +351,21 @@ export const confirmMint = asyncHandler(async (req, res) => {
       "Wallet not authorized or NFT already minted/not allocated",
       403
     );
+  }
+
+  if (await NFT.exists({ nftAddress: nft_Mint_Address })) {
+    throw new AppError("This mint address is already recorded", 409);
+  }
+
+  // Never trust the client's word that a mint happened: check the chain.
+  try {
+    await verifyCredentialMint({
+      mintAddress: nft_Mint_Address,
+      ownerAddress: wallet.address,
+      expectedUri: allocation.uri,
+    });
+  } catch (error) {
+    throw new AppError(`Mint could not be verified: ${error.message}`, 400);
   }
 
   if (!allocation.studentId && wallet.userId) {
