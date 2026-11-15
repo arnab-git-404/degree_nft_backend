@@ -9,7 +9,7 @@ import User from "../models/user.js";
 import Role from "../models/role.js";
 import Wallet from "../models/wallet.js";
 import { buildActivationUrl, createActivationToken } from "../utils/activationToken.js";
-import { sendActivationEmail } from "../services/emailService.js";
+import { trySendTemplateEmail } from "../services/emailService.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
@@ -391,14 +391,12 @@ export const approveApplication = asyncHandler(async (req, res) => {
   // shortcut: email is sent right after commit, not through an outbox worker; if it fails the admin
   // still sees the link (non-production). Add an outbox before production (P09).
   const activationUrl = buildActivationUrl(activation.token);
-  let delivery = "not_configured";
-  try {
-    const result = await sendActivationEmail({ to: application.email, name: application.contactName, activationUrl });
-    delivery = result.delivered ? "sent" : result.provider;
-  } catch (error) {
-    delivery = "failed";
-    console.error("Activation email delivery failed:", error.message);
-  }
+  const delivery = await trySendTemplateEmail("applicationApproved", application.email, {
+    contactName: application.contactName,
+    institutionName: application.name,
+    code: application.code,
+    activationUrl,
+  });
 
   await audit(req, {
     action: "admin.application.approve",
@@ -432,13 +430,21 @@ export const rejectApplication = asyncHandler(async (req, res) => {
     throw new AppError("Only PENDING applications can be rejected", 409);
   }
 
+  // Tell the applicant why, so they can fix it and apply again.
+  const delivery = await trySendTemplateEmail("applicationRejected", application.email, {
+    contactName: application.contactName,
+    institutionName: application.name,
+    code: application.code,
+    reason,
+  });
+
   await audit(req, {
     action: "admin.application.reject",
     targetType: "InstitutionApplication",
     targetId: application._id,
     summary: `Rejected ${application.name} (${application.code})`,
-    details: { reason },
+    details: { reason, emailDelivery: delivery },
   });
 
-  res.status(200).json({ success: true, application });
+  res.status(200).json({ success: true, application, emailDelivery: delivery });
 });

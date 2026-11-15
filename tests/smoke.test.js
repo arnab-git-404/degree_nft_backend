@@ -21,6 +21,9 @@ import InstitutionApplication from "../models/institutionApplication.js";
 import RegistrationLink from "../models/registrationLink.js";
 import { audit } from "../utils/audit.js";
 import NFT from "../models/nft.js";
+import PlatformSetting from "../models/platformSetting.js";
+import { decryptSecret } from "../utils/secretBox.js";
+import { sendMail } from "../services/emailService.js";
 import StudentDetails from "../models/studentDetails.js";
 
 describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not set" }, () => {
@@ -663,6 +666,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const rejected = await call("POST", `/admin/applications/${application._id}/reject`, { token: admin.token, body: { reason: "Not accredited" } });
       assert.equal(rejected.status, 200);
       assert.equal(rejected.body.application.reviewNote, "Not accredited");
+      assert.ok(["sent", "console", "failed"].includes(rejected.body.emailDelivery), "the applicant is emailed the reason");
       assert.equal((await call("POST", `/admin/applications/${application._id}/approve`, { token: admin.token })).status, 409);
       assert.equal(await Institution.countDocuments({ code: application.code }), 0);
     });
@@ -908,6 +912,73 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.ok(members.body.roles.some((role) => role.name === "institution_admin"), "Super Admin is offered admin roles");
       // The demoted old head can no longer manage anyone, least of all the new head.
       assert.equal((await call("PATCH", `/institution/staff/${deputy.membership._id}`, { token: tenant.head.token, institution: tenant.institution, body: { status: "SUSPENDED" } })).status, 403);
+    });
+  });
+
+  describe("platform SMTP settings", () => {
+    let saved;
+
+    // The settings document is shared with the real dev setup: keep it and put it back.
+    before(async () => {
+      saved = await PlatformSetting.collection.findOne({ key: "platform" });
+    });
+
+    after(async () => {
+      await PlatformSetting.collection.deleteOne({ key: "platform" });
+      if (saved) await PlatformSetting.collection.insertOne(saved);
+    });
+
+    const valid = { enabled: false, host: "127.0.0.1", port: 2525, secure: false, username: "smoke", fromName: "Smoke", fromEmail: "smoke-smtp@example.test" };
+
+    test("only platform admins can read or change SMTP settings", async () => {
+      const staff = await makeUser("institution");
+      assert.equal((await call("GET", "/admin/settings/smtp", { token: staff.token })).status, 403);
+      assert.equal((await call("PUT", "/admin/settings/smtp", { token: staff.token, body: valid })).status, 403);
+    });
+
+    test("input is validated", async () => {
+      const admin = await makeUser("admin");
+      const put = (body) => call("PUT", "/admin/settings/smtp", { token: admin.token, body: { ...valid, ...body } });
+      assert.equal((await put({ port: 8080 })).status, 400);
+      assert.equal((await put({ host: "smtp.example.com/evil" })).status, 400);
+      assert.equal((await put({ fromEmail: "nope" })).status, 400);
+      assert.equal((await put({ enabled: true, host: "" })).status, 400);
+    });
+
+    test("the password is stored encrypted and never returned", async () => {
+      const admin = await makeUser("admin");
+      const saveWith = (body) => call("PUT", "/admin/settings/smtp", { token: admin.token, body: { ...valid, ...body } });
+
+      const first = await saveWith({ password: "s3cret-pass" });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(first.body.smtp.hasPassword, true);
+      assert.ok(!JSON.stringify(first.body).includes("s3cret-pass"));
+      assert.equal(first.body.smtp.passwordEncrypted, undefined);
+
+      const stored = await PlatformSetting.findOne({ key: "platform" }).select("+smtp.passwordEncrypted");
+      assert.notEqual(stored.smtp.passwordEncrypted, "s3cret-pass");
+      assert.equal(decryptSecret(stored.smtp.passwordEncrypted), "s3cret-pass");
+
+      const read = await call("GET", "/admin/settings/smtp", { token: admin.token });
+      assert.ok(!JSON.stringify(read.body).includes(stored.smtp.passwordEncrypted));
+
+      // Saving without a password keeps it; clearPassword removes it.
+      assert.equal((await saveWith({ fromName: "Renamed" })).body.smtp.hasPassword, true);
+      assert.equal((await saveWith({ clearPassword: true })).body.smtp.hasPassword, false);
+    });
+
+    test("a failing test email is reported and recorded; enabled SMTP is used for all mail", async () => {
+      const admin = await makeUser("admin");
+      // Nothing listens on 127.0.0.1:2525, so the connection is refused at once.
+      await call("PUT", "/admin/settings/smtp", { token: admin.token, body: valid });
+      const tested = await call("POST", "/admin/settings/smtp/test", { token: admin.token, body: { to: "smoke-smtp@example.test" } });
+      assert.equal(tested.status, 502);
+      const read = await call("GET", "/admin/settings/smtp", { token: admin.token });
+      assert.equal(read.body.smtp.lastTestOk, false);
+      assert.ok(read.body.smtp.lastTestError);
+
+      await call("PUT", "/admin/settings/smtp", { token: admin.token, body: { ...valid, enabled: true } });
+      await assert.rejects(sendMail({ to: "smoke-smtp@example.test", subject: "x", text: "x", html: "x" }));
     });
   });
 

@@ -1,6 +1,7 @@
 import express from "express";
 import * as adminController from "../controllers/adminController.js";
 import * as registrationController from "../controllers/registrationController.js";
+import * as settingsController from "../controllers/settingsController.js";
 import { protect, requirePermission } from "../middleware/auth.js";
 
 const router = express.Router();
@@ -8,6 +9,10 @@ const router = express.Router();
 router.use(protect, requirePermission("platform:manage"));
 
 router.get("/stats", adminController.getDashboardStats);
+
+router.get("/settings/smtp", settingsController.getSmtpSettings);
+router.put("/settings/smtp", settingsController.updateSmtpSettings);
+router.post("/settings/smtp/test", settingsController.testSmtpSettings);
 
 router.get("/permissions", adminController.getPermissionCatalog);
 router.get("/roles", adminController.getRoles);
