@@ -104,7 +104,7 @@ export const backfillWalletReferences = async (userId, wallet) => {
 
 export const findOrCreateUserByWallet = async (
   walletAddress,
-  { name, verified = false, roleName } = {}
+  { name, verified = false, roleName, account } = {}
 ) => {
   let wallet = await Wallet.findOne({
     chain: "solana",
@@ -129,13 +129,9 @@ export const findOrCreateUserByWallet = async (
       throw new AppError("Wallet is not linked to a valid user", 401);
     }
 
-    if (
-      assignedRole &&
-      user.roleId.toString() !== assignedRole._id.toString()
-    ) {
-      user.roleId = assignedRole._id;
-      await user.save();
-    }
+    if (assignedRole) user.roleId = assignedRole._id;
+    if (account) Object.assign(user, account);
+    if (user.isModified()) await user.save();
   } else {
     const role =
       assignedRole ||
@@ -148,6 +144,7 @@ export const findOrCreateUserByWallet = async (
     user = await User.create({
       name: name ? String(name).trim() : deriveUserName(walletAddress),
       roleId: role._id,
+      ...account,
     });
 
     wallet = await Wallet.create({

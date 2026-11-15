@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
-import User from "../models/user.js";
+import User, { SUPER_ADMIN_ACCOUNT } from "../models/user.js";
 import Wallet from "../models/wallet.js";
 import AuthNonce from "../models/authNonce.js";
 import AppError from "../utils/AppError.js";
@@ -177,6 +177,7 @@ export const walletLogin = asyncHandler(async (req, res) => {
     name,
     verified: true,
     roleName,
+    account: isAdminWallet ? SUPER_ADMIN_ACCOUNT : undefined,
   });
 
   if (!user.isActive) {

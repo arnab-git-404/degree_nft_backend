@@ -1,5 +1,9 @@
 import mongoose from "mongoose";
 
+export const USER_TYPES = ["SUPER_ADMIN", "ADMIN", "STAFF", "STUDENT"];
+// Bootstrap platform operator (env admin wallets, seedAdmin). Everyone else is labelled by an admin.
+export const SUPER_ADMIN_ACCOUNT = { userType: "SUPER_ADMIN" };
+
 const UserSchema = new mongoose.Schema(
   {
     name: {
@@ -24,6 +28,13 @@ const UserSchema = new mongoose.Schema(
       ref: "Role",
       required: true,
       index: true,
+    },
+    // UI/onboarding label only; access always comes from the role's permissions.
+    userType: {
+      type: String,
+      enum: USER_TYPES,
+      default: "STUDENT",
+      required: true,
     },
     isActive: {
       type: Boolean,

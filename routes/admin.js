@@ -1,15 +1,11 @@
 import express from "express";
 import * as adminController from "../controllers/adminController.js";
 import * as registrationController from "../controllers/registrationController.js";
-import {
-  protect,
-  authorize,
-  requirePermission,
-} from "../middleware/auth.js";
+import { protect, requirePermission } from "../middleware/auth.js";
 
 const router = express.Router();
 
-router.use(protect, authorize("admin"));
+router.use(protect, requirePermission("platform:manage"));
 
 router.get("/stats", adminController.getDashboardStats);
 
@@ -22,6 +18,7 @@ router.delete("/roles/:roleId", adminController.deleteRole);
 
 router.get("/users", adminController.getUsers);
 router.patch("/users/:userId/role", adminController.updateUserRole);
+router.patch("/users/:userId/account", adminController.updateUserAccount);
 router.patch("/users/:userId/status", adminController.updateUserStatus);
 
 router.get("/universities", adminController.getUniversities);

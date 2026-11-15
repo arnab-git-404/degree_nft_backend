@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import User from "../models/user.js";
+import User, { USER_TYPES } from "../models/user.js";
 import Role from "../models/role.js";
 import University from "../models/university.js";
 import NFT from "../models/nft.js";
@@ -427,6 +427,31 @@ export const updateUserRole = asyncHandler(async (req, res) => {
   }
 
   user.roleId = roleDocument._id;
+  await user.save();
+  await user.populate(["roleId", "primaryWallet"]);
+
+  res.status(200).json({ success: true, user: user.toJSON() });
+});
+
+// Admin sets the userType label explicitly; it is never derived from roles and grants nothing.
+export const updateUserAccount = asyncHandler(async (req, res) => {
+  const { userType } = req.body;
+
+  if (!USER_TYPES.includes(userType)) {
+    throw new AppError(`userType must be one of ${USER_TYPES.join(", ")}`, 400);
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(req.params.userId)) {
+    throw new AppError("Invalid user id", 400);
+  }
+
+  const user = await User.findById(req.params.userId);
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  user.userType = userType;
   await user.save();
   await user.populate(["roleId", "primaryWallet"]);
 

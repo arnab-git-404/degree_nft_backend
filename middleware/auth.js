@@ -41,7 +41,7 @@ export const authorize = (...roleNames) => (req, res, next) => {
   next();
 };
 
-export const requirePermission = (permission) => (req, res, next) => {
+export const requirePermission =(permission) => (req, res, next) => {
   const permissions = req.user?.roleId?.permissions || [];
 
   if (permissions.includes("*") || permissions.includes(permission)) {

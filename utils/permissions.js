@@ -1,5 +1,18 @@
 export const PERMISSION_GROUPS = [
   {
+    key: "platform",
+    label: "Platform",
+    description: "Run the DegreeNFT platform.",
+    permissions: [
+      {
+        key: "platform:manage",
+        label: "Admin panel",
+        description:
+          "Open the admin panel: manage users, roles, universities, credentials, reports and registration links.",
+      },
+    ],
+  },
+  {
     key: "credentials",
     label: "Credentials",
     description: "Issue, inspect, and confirm degree credentials.",

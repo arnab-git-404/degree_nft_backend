@@ -19,7 +19,7 @@ import StudentDetails from "../models/studentDetails.js";
 describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not set" }, () => {
   let server;
   let base;
-  const created = { users: [], wallets: [], unis: [] };
+  const created = { users: [], wallets: [], unis: [], roles: [] };
 
   const call = async (method, path, { token, body } = {}) => {
     const response = await fetch(base + path, {
@@ -33,9 +33,9 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     return { status: response.status, body: await response.json() };
   };
 
-  const makeUser = async (roleName) => {
+  const makeUser = async (roleName, fields = {}) => {
     const role = await Role.findOne({ name: roleName });
-    const user = await User.create({ name: `smoke-${roleName}`, roleId: role._id });
+    const user = await User.create({ name: `smoke-${roleName}`, roleId: role._id, ...fields });
     const wallet = await Wallet.create({
       userId: user._id,
       address: Keypair.generate().publicKey.toBase58(),
@@ -84,6 +84,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     await University.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
+    await Role.deleteMany({ _id: { $in: created.roles } });
     server?.close();
     await mongoose.disconnect();
   });
@@ -115,6 +116,68 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
 
       const replayed = await call("POST", "/auth/login/wallet", { body: { walletAddress, signature } });
       assert.equal(replayed.status, 401);
+    });
+  });
+
+  describe("userType label and permission-based admin access (P01-01/P01-02)", () => {
+    test("admin API needs the platform:manage permission; userType alone grants nothing", async () => {
+      const labelOnly = await makeUser("student", { userType: "SUPER_ADMIN" });
+      assert.equal((await call("GET", "/admin/stats", { token: labelOnly.token })).status, 403);
+
+      const customRole = await Role.create({
+        name: `smoke-ops-${Date.now()}`,
+        displayName: "Smoke Ops",
+        permissions: ["platform:manage"],
+      });
+      created.roles.push(customRole._id);
+      const operator = await makeUser(customRole.name);
+      assert.equal((await call("GET", "/admin/stats", { token: operator.token })).status, 200);
+
+      const admin = await makeUser("admin");
+      assert.equal((await call("GET", "/admin/stats", { token: admin.token })).status, 200);
+    });
+
+    test("profile PATCH cannot set userType", async () => {
+      const student = await makeUser("student");
+      const response = await call("PATCH", "/auth/profile", {
+        token: student.token,
+        body: { name: "still a student", userType: "SUPER_ADMIN" },
+      });
+      assert.equal(response.status, 200);
+      assert.equal((await User.findById(student.user._id)).userType, "STUDENT");
+    });
+
+    test("role change does not touch userType", async () => {
+      const admin = await makeUser("admin");
+      const target = await makeUser("student");
+      const response = await call("PATCH", `/admin/users/${target.user._id}/role`, {
+        token: admin.token,
+        body: { role: "admin", userType: "SUPER_ADMIN" },
+      });
+      assert.equal(response.status, 200);
+      assert.equal((await User.findById(target.user._id)).userType, "STUDENT");
+    });
+
+    test("only the admin panel sets userType, with validation", async () => {
+      const admin = await makeUser("admin");
+      const target = await makeUser("student");
+      const path = `/admin/users/${target.user._id}/account`;
+
+      assert.equal((await call("PATCH", path, { token: target.token, body: { userType: "STAFF" } })).status, 403);
+      assert.equal((await call("PATCH", path, { token: admin.token, body: { userType: "GOD" } })).status, 400);
+      assert.equal((await call("PATCH", path, { token: admin.token, body: { userType: "STAFF" } })).status, 200);
+      assert.equal((await User.findById(target.user._id)).userType, "STAFF");
+    });
+
+    test("users created from a wallet are STUDENT", async () => {
+      const owner = await makeUser("university");
+      await makeUniversity(owner, "VERIFIED");
+      const studentWallet = Keypair.generate().publicKey.toBase58();
+      await call("POST", "/create-nft-ipfsHash-allocation", { token: owner.token, body: allocation(studentWallet) });
+      const wallet = await Wallet.findOne({ address: studentWallet });
+      created.wallets.push(wallet._id);
+      created.users.push(wallet.userId);
+      assert.equal((await User.findById(wallet.userId)).userType, "STUDENT");
     });
   });
 

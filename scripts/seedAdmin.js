@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import bs58 from "bs58";
 import mongoose from "mongoose";
 import { Keypair } from "@solana/web3.js";
-import User from "../models/user.js";
+import User, { SUPER_ADMIN_ACCOUNT } from "../models/user.js";
 import Role from "../models/role.js";
 import Wallet from "../models/wallet.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
@@ -54,6 +54,7 @@ const main = async () => {
       name,
       email,
       roleId: role._id,
+      ...SUPER_ADMIN_ACCOUNT,
       isActive: true,
       emailVerified: true,
     },
