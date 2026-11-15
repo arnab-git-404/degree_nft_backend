@@ -2,6 +2,7 @@ import { audit, auditFailures } from "../utils/audit.js";
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import User, { SUPER_ADMIN_ACCOUNT } from "../models/user.js";
+import InstitutionMembership from "../models/institutionMembership.js";
 import Wallet from "../models/wallet.js";
 import AuthNonce from "../models/authNonce.js";
 import AppError from "../utils/AppError.js";
@@ -245,6 +246,11 @@ export const activateAccount = asyncHandler(async (req, res) => {
   user.activationExpiresAt = null;
   user.lastLoginAt = new Date();
   await user.save();
+  // Accepting the invite: the one-time link proves the invited person, so their college invites become ACTIVE.
+  await InstitutionMembership.updateMany(
+    { userId: user._id, status: "INVITED" },
+    { status: "ACTIVE", acceptedAt: new Date() }
+  );
   await populateUser(user);
   await audit(req, { action: "auth.account.activate", scope: "ACCOUNT", actor: user, targetType: "User", targetId: user._id, summary: "Activated account" });
 

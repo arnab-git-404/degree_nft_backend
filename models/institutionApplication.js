@@ -40,6 +40,12 @@ const InstitutionApplicationSchema = new mongoose.Schema(
       default: "PENDING",
       index: true,
     },
+    // Set by the Super Admin review (approve or reject).
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    reviewedAt: Date,
+    reviewNote: { type: String, trim: true, default: "", maxlength: 1000 },
+    // The college created on approval (also the idempotency answer for a repeated approve).
+    institutionId: { type: mongoose.Schema.Types.ObjectId, ref: "Institution" },
   },
   { timestamps: true },
 );

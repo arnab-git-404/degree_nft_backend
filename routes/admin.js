@@ -31,6 +31,10 @@ router.get("/nfts", adminController.getNftAllocations);
 
 router.get("/audit-logs", adminController.getAuditLogs);
 
+router.get("/applications", adminController.getApplications);
+router.post("/applications/:applicationId/approve", registrationController.approveApplication);
+router.post("/applications/:applicationId/reject", registrationController.rejectApplication);
+
 router.get("/registration-links", registrationController.getRegistrationLinks);
 router.post("/registration-links", registrationController.createRegistrationLink);
 router.patch(

@@ -7,6 +7,7 @@ import { INSTITUTION_STATUSES } from "../models/institution.js";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
 import AuditLog, { AUDIT_METHODS, AUDIT_SCOPES } from "../models/auditLog.js";
+import InstitutionApplication from "../models/institutionApplication.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import {
@@ -672,6 +673,38 @@ export const getAuditLogs = asyncHandler(async (req, res) => {
       last24h,
       methods: Object.fromEntries(AUDIT_METHODS.map((name, i) => [name, methodCounts[i]])),
     },
+    pagination: paginationMeta(page, limit, total),
+  });
+});
+
+export const getApplications = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = getPagination(req.query);
+  const { status, search } = req.query;
+  const filter = {};
+
+  if (["PENDING", "APPROVED", "REJECTED"].includes(status)) {
+    filter.status = status;
+  }
+
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+    filter.$or = [{ name: regex }, { code: regex }, { email: regex }, { contactName: regex }];
+  }
+
+  const [applications, total] = await Promise.all([
+    InstitutionApplication.find(filter)
+      .populate("linkId", "label")
+      .populate("reviewedBy", "name")
+      .populate("institutionId", "name code status")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    InstitutionApplication.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    applications,
     pagination: paginationMeta(page, limit, total),
   });
 });

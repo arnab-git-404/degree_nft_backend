@@ -17,6 +17,8 @@ import Wallet from "../models/wallet.js";
 import Institution from "../models/institution.js";
 import InstitutionMembership from "../models/institutionMembership.js";
 import AuditLog from "../models/auditLog.js";
+import InstitutionApplication from "../models/institutionApplication.js";
+import RegistrationLink from "../models/registrationLink.js";
 import { audit } from "../utils/audit.js";
 import NFT from "../models/nft.js";
 import StudentDetails from "../models/studentDetails.js";
@@ -298,26 +300,6 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       for (const name of ["institution_admin", "registrar", "staff"]) assert.ok(names.includes(name), name);
     });
 
-    test("creating a college profile makes the creator its ACTIVE head", async () => {
-      const owner = await makeUser("institution");
-      const response = await call("POST", "/institution/profile", {
-        token: owner.token,
-        body: { name: "Head U", code: `HEAD${Date.now()}`, walletAddress: owner.wallet.address },
-      });
-      assert.equal(response.status, 201);
-      created.unis.push(response.body.institution._id);
-
-      const institution = await Institution.findById(response.body.institution._id);
-      assert.equal(institution.institutionType, "COLLEGE");
-      assert.equal(institution.status, "ACTIVE");
-
-      const membership = await InstitutionMembership.findById(institution.primaryAdminMembershipId).populate("roleId");
-      assert.ok(membership.userId.equals(owner.user._id));
-      assert.ok(membership.institutionId.equals(institution._id));
-      assert.equal(membership.roleId.name, "institution_admin");
-      assert.equal(membership.status, "ACTIVE");
-    });
-
     test("membership rejects a platform role and duplicate (user, institution)", async () => {
       const owner = await makeUser("institution");
       const institution = await makeInstitution(owner, "VERIFIED");
@@ -571,42 +553,162 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     });
   });
 
-  describe("no self-promotion (P00-04)", () => {
-    test("student cannot create an institution profile and keeps the student role", async () => {
+  describe("college onboarding: apply → approve → head activation (P03)", () => {
+    const tag = `${Date.now().toString(36)}${Math.floor(Math.random() * 36).toString(36)}`;
+    let seq = 0;
+
+    after(async () => {
+      const codes = new RegExp(`^SMKP3${tag}`, "i");
+      const users = await User.find({ email: new RegExp(`^smoke-p3-${tag}`) }).select("_id");
+      const institutions = await Institution.find({ code: codes }).select("_id");
+      const userIds = users.map((u) => u._id);
+      const institutionIds = institutions.map((i) => i._id);
+      await AuditLog.deleteMany({ $or: [{ actorId: { $in: userIds } }, { institutionId: { $in: institutionIds } }, { summary: codes }] });
+      await InstitutionMembership.deleteMany({ institutionId: { $in: institutionIds } });
+      await Institution.deleteMany({ _id: { $in: institutionIds } });
+      await Wallet.deleteMany({ userId: { $in: userIds } });
+      await User.deleteMany({ _id: { $in: userIds } });
+      await InstitutionApplication.deleteMany({ code: codes });
+      await RegistrationLink.deleteMany({ label: new RegExp(`^smoke-p3-${tag}`) });
+    });
+
+    const newLink = async (admin) => {
+      const response = await call("POST", "/admin/registration-links", { token: admin.token, body: { label: `smoke-p3-${tag}` } });
+      assert.equal(response.status, 201);
+      return response.body.link;
+    };
+
+    const apply = async (link, overrides = {}) => {
+      seq += 1;
+      const body = {
+        name: `Smoke College ${seq}`,
+        code: `SMKP3${tag}${seq}`,
+        email: `smoke-p3-${tag}-${seq}@example.test`,
+        contactName: `Head ${seq}`,
+        walletAddress: Keypair.generate().publicKey.toBase58(),
+        ...overrides,
+      };
+      const response = await call("POST", `/registration/${link.token}/apply`, { body });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      return InstitutionApplication.findOne({ code: body.code.toUpperCase() });
+    };
+
+    const tokenFor = async (userId) => signToken(await User.findById(userId).populate("roleId"));
+
+    test("full flow: approval creates an INVITED head; activation makes them ACTIVE; the link is single-use", async () => {
+      const admin = await makeUser("admin");
+      const application = await apply(await newLink(admin));
+      assert.equal(application.status, "PENDING");
+
+      const outsider = await makeUser("institution");
+      assert.equal((await call("POST", `/admin/applications/${application._id}/approve`, { token: outsider.token })).status, 403);
+
+      const approved = await call("POST", `/admin/applications/${application._id}/approve`, { token: admin.token });
+      assert.equal(approved.status, 201, JSON.stringify(approved.body));
+      assert.ok(approved.body.activationUrl);
+
+      const institution = await Institution.findById(approved.body.institution._id);
+      assert.equal(institution.status, "ACTIVE");
+      assert.equal(institution.verificationStatus, "VERIFIED");
+      assert.ok(institution.applicationId.equals(application._id));
+
+      const membership = await InstitutionMembership.findById(institution.primaryAdminMembershipId).populate("roleId");
+      assert.equal(membership.status, "INVITED");
+      assert.equal(membership.roleId.name, "institution_admin");
+      const head = await User.findById(membership.userId);
+      assert.equal(head.userType, "ADMIN");
+      assert.equal(head.email, application.email);
+
+      const reviewed = await InstitutionApplication.findById(application._id);
+      assert.equal(reviewed.status, "APPROVED");
+      assert.ok(reviewed.reviewedBy.equals(admin.user._id));
+      assert.ok(reviewed.institutionId.equals(institution._id));
+
+      // INVITED: no college access yet.
+      const headToken = await tokenFor(head._id);
+      assert.equal((await call("GET", "/institution/profile", { token: headToken, institution })).status, 403);
+
+      const activationToken = approved.body.activationUrl.split("/").pop();
+      assert.equal((await call("POST", `/auth/activate/${activationToken}`)).status, 200);
+      assert.equal((await InstitutionMembership.findById(membership._id)).status, "ACTIVE");
+      assert.equal((await call("GET", "/institution/profile", { token: headToken, institution })).status, 200);
+
+      assert.equal((await call("POST", `/auth/activate/${activationToken}`)).status, 400);
+    });
+
+    test("approving again, even concurrently, never creates a second college", async () => {
+      const admin = await makeUser("admin");
+      const link = await newLink(admin);
+
+      const first = await apply(link);
+      const once = await call("POST", `/admin/applications/${first._id}/approve`, { token: admin.token });
+      const twice = await call("POST", `/admin/applications/${first._id}/approve`, { token: admin.token });
+      assert.equal(twice.status, 200);
+      assert.equal(twice.body.alreadyApproved, true);
+      assert.equal(twice.body.institution._id, once.body.institution._id);
+
+      const second = await apply(link);
+      const results = await Promise.all(
+        [1, 2, 3].map(() => call("POST", `/admin/applications/${second._id}/approve`, { token: admin.token }))
+      );
+      assert.ok(results.every((r) => r.status === 200 || r.status === 201 || r.status === 409), JSON.stringify(results.map((r) => r.status)));
+      assert.equal(await Institution.countDocuments({ code: second.code }), 1);
+      assert.equal(await InstitutionMembership.countDocuments({ institutionId: (await Institution.findOne({ code: second.code }))._id }), 1);
+    });
+
+    test("rejection needs a reason, creates nothing, and blocks a later approval", async () => {
+      const admin = await makeUser("admin");
+      const application = await apply(await newLink(admin));
+      assert.equal((await call("POST", `/admin/applications/${application._id}/reject`, { token: admin.token, body: {} })).status, 400);
+      const rejected = await call("POST", `/admin/applications/${application._id}/reject`, { token: admin.token, body: { reason: "Not accredited" } });
+      assert.equal(rejected.status, 200);
+      assert.equal(rejected.body.application.reviewNote, "Not accredited");
+      assert.equal((await call("POST", `/admin/applications/${application._id}/approve`, { token: admin.token })).status, 409);
+      assert.equal(await Institution.countDocuments({ code: application.code }), 0);
+    });
+
+    test("approval refuses to attach a college to an existing account", async () => {
+      const admin = await makeUser("admin");
+      const email = `smoke-p3-${tag}-taken@example.test`;
+      await makeUser("student", { email });
+      const application = await apply(await newLink(admin), { email });
+      const response = await call("POST", `/admin/applications/${application._id}/approve`, { token: admin.token });
+      assert.equal(response.status, 409);
+      assert.equal((await InstitutionApplication.findById(application._id)).status, "PENDING");
+    });
+
+    test("an expired registration link stops accepting applications", async () => {
+      const admin = await makeUser("admin");
+      const link = await newLink(admin);
+      assert.ok(new Date(link.expiresAt) > new Date());
+      await RegistrationLink.updateOne({ _id: link._id }, { expiresAt: new Date(Date.now() - 1000) });
+      assert.equal((await call("GET", `/registration/${link.token}`)).status, 404);
+    });
+
+    test("applications list is admin-only, paginated and filterable by status", async () => {
+      const admin = await makeUser("admin");
+      const application = await apply(await newLink(admin));
       const student = await makeUser("student");
-      const response = await call("POST", "/institution/profile", {
-        token: student.token,
-        body: { name: "Evil U", code: `EVIL${Date.now()}`, walletAddress: student.wallet.address },
-      });
-      assert.equal(response.status, 403);
-      const reloaded = await User.findById(student.user._id).populate("roleId");
-      assert.equal(reloaded.roleId.name, "student");
+      assert.equal((await call("GET", "/admin/applications", { token: student.token })).status, 403);
+      const list = await call("GET", `/admin/applications?status=PENDING&search=${application.code}`, { token: admin.token });
+      assert.equal(list.status, 200, JSON.stringify(list.body));
+      assert.equal(list.body.applications.length, 1);
+      assert.equal(list.body.pagination.total, 1);
     });
+  });
 
-    test("institution-role user can still create a profile", async () => {
-      const institution = await makeUser("institution");
-      const response = await call("POST", "/institution/profile", {
-        token: institution.token,
-        body: { name: "Smoke U", code: `SMOKEP${Date.now()}`, walletAddress: institution.wallet.address },
-      });
-      assert.equal(response.status, 201);
-      created.unis.push(response.body.institution._id);
-    });
-
-    test("a custom-named role with nft:create can create a profile (name never matters)", async () => {
-      const customRole = await Role.create({
-        name: `smoke-registrar-${Date.now()}`,
-        displayName: "Smoke Registrar",
-        permissions: ["nft:create"],
-      });
-      created.roles.push(customRole._id);
-      const registrar = await makeUser(customRole.name);
-      const response = await call("POST", "/institution/profile", {
-        token: registrar.token,
-        body: { name: "Smoke Reg U", code: `SMOKER${Date.now()}`, walletAddress: registrar.wallet.address },
-      });
-      assert.equal(response.status, 201);
-      created.unis.push(response.body.institution._id);
+  describe("no self-promotion (P00-04)", () => {
+    test("no account can create a college by itself; the self-serve endpoint is gone (P03-06)", async () => {
+      for (const roleName of ["student", "institution", "admin"]) {
+        const user = await makeUser(roleName);
+        const response = await call("POST", "/institution/profile", {
+          token: user.token,
+          body: { name: "Self U", code: `SELF${Date.now()}`, walletAddress: user.wallet.address },
+        });
+        assert.equal(response.status, 404, roleName);
+        const reloaded = await User.findById(user.user._id).populate("roleId");
+        assert.equal(reloaded.roleId.name, roleName);
+      }
     });
 
     test("only a VERIFIED institution can allocate credentials", async () => {

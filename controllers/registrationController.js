@@ -4,6 +4,12 @@ import mongoose from "mongoose";
 import RegistrationLink from "../models/registrationLink.js";
 import InstitutionApplication from "../models/institutionApplication.js";
 import Institution from "../models/institution.js";
+import InstitutionMembership from "../models/institutionMembership.js";
+import User from "../models/user.js";
+import Role from "../models/role.js";
+import Wallet from "../models/wallet.js";
+import { buildActivationUrl, createActivationToken } from "../utils/activationToken.js";
+import { sendActivationEmail } from "../services/emailService.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
@@ -72,7 +78,7 @@ const findActiveLink = async (token) => {
       ? await RegistrationLink.findOne({ token })
       : null;
 
-  if (!link || !link.isActive) {
+  if (!link || !link.isActive || (link.expiresAt && link.expiresAt <= new Date())) {
     throw new AppError(
       "This registration link is invalid or no longer active.",
       404,
@@ -142,11 +148,17 @@ export const getRegistrationLinks = asyncHandler(async (req, res) => {
 
 export const createRegistrationLink = asyncHandler(async (req, res) => {
   const label = field(req.body, "label", { required: true, max: 100 });
+  const expiresInDays = Number(req.body?.expiresInDays ?? 30);
+
+  if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 365) {
+    throw new AppError("expiresInDays must be a whole number from 1 to 365", 400);
+  }
 
   const link = await RegistrationLink.create({
     token: randomBytes(24).toString("base64url"),
     label,
     createdBy: req.user._id,
+    expiresAt: new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000),
   });
   await link.populate("createdBy", "name email");
   await audit(req, { action: "admin.registrationLink.create", targetType: "RegistrationLink", targetId: link._id, summary: `Created registration link "${link.label}"` });
@@ -184,4 +196,201 @@ export const updateRegistrationLink = asyncHandler(async (req, res) => {
   await audit(req, { action: "admin.registrationLink.update", targetType: "RegistrationLink", targetId: link._id, summary: `Updated registration link "${link.label}"`, details: { isActive: link.isActive } });
 
   res.status(200).json({ success: true, link });
+});
+
+const loadApplication = async (applicationId) => {
+  if (!/^[a-f0-9]{24}$/i.test(String(applicationId))) {
+    throw new AppError("Application not found", 404);
+  }
+
+  const application = await InstitutionApplication.findById(applicationId);
+
+  if (!application) {
+    throw new AppError("Application not found", 404);
+  }
+
+  return application;
+};
+
+/**
+ * Super Admin approval (design §10.2). One transaction creates the head's account and wallet,
+ * the ACTIVE institution, an INVITED institution_admin membership (the head) and marks the
+ * application APPROVED. Repeating the call returns the same institution instead of a new tenant.
+ */
+export const approveApplication = asyncHandler(async (req, res) => {
+  const application = await loadApplication(req.params.applicationId);
+
+  if (application.status === "APPROVED") {
+    const institution = await Institution.findById(application.institutionId);
+    res.status(200).json({ success: true, alreadyApproved: true, application, institution });
+    return;
+  }
+
+  if (application.status !== "PENDING") {
+    throw new AppError(`Only PENDING applications can be approved (this one is ${application.status})`, 409);
+  }
+
+  // Never attach college-admin rights to an account that already exists (design §10.2).
+  const [codeTaken, emailTaken, walletTaken] = await Promise.all([
+    Institution.exists({ code: application.code }),
+    User.exists({ email: application.email }),
+    Wallet.exists({ chain: "solana", address: application.walletAddress }),
+  ]);
+
+  if (codeTaken) throw new AppError(`An institution with code ${application.code} already exists`, 409);
+  if (emailTaken) throw new AppError("An account with this email already exists; ask the applicant for a new contact email", 409);
+  if (walletTaken) throw new AppError("This wallet already belongs to an account; ask the applicant for a new wallet", 409);
+
+  const [studentRole, headRole] = await Promise.all([
+    Role.findOne({ name: "student", isActive: true }),
+    Role.findOne({ name: "institution_admin", scope: "INSTITUTION", isActive: true }),
+  ]);
+
+  if (!studentRole || !headRole) {
+    throw new AppError("Default roles are not configured", 500);
+  }
+
+  const activation = createActivationToken();
+  let institution;
+  const session = await mongoose.startSession();
+
+  try {
+    await session.withTransaction(async () => {
+      // Claim the application inside the transaction: a concurrent approve finds it no longer PENDING.
+      const claimed = await InstitutionApplication.findOneAndUpdate(
+        { _id: application._id, status: "PENDING" },
+        { status: "APPROVED", reviewedBy: req.user._id, reviewedAt: new Date() },
+        { new: true, session }
+      );
+
+      if (!claimed) {
+        throw new AppError("This application was just reviewed by someone else", 409);
+      }
+
+      const [head] = await User.create(
+        [
+          {
+            name: application.contactName,
+            email: application.email,
+            roleId: studentRole._id,
+            userType: "ADMIN",
+            activationTokenHash: activation.hash,
+            activationExpiresAt: activation.expiresAt,
+          },
+        ],
+        { session }
+      );
+
+      const [wallet] = await Wallet.create(
+        [{ userId: head._id, address: application.walletAddress, isPrimary: true, isVerified: false }],
+        { session }
+      );
+
+      [institution] = await Institution.create(
+        [
+          {
+            userId: head._id,
+            name: application.name,
+            code: application.code,
+            status: "ACTIVE",
+            verificationStatus: "VERIFIED",
+            applicationId: application._id,
+            walletAddress: wallet.address,
+            walletId: wallet._id,
+            email: application.email,
+            phone: application.phone,
+            website: application.website,
+            accreditation: application.accreditation,
+            address: application.address,
+          },
+        ],
+        { session }
+      );
+
+      const [membership] = await InstitutionMembership.create(
+        [
+          {
+            userId: head._id,
+            institutionId: institution._id,
+            roleId: headRole._id,
+            status: "INVITED",
+            invitedBy: req.user._id,
+            invitedAt: new Date(),
+          },
+        ],
+        { session }
+      );
+
+      institution.primaryAdminMembershipId = membership._id;
+      await institution.save({ session });
+
+      claimed.institutionId = institution._id;
+      await claimed.save({ session });
+    });
+  } catch (error) {
+    // A concurrent approve that won the race created the tenant: answer with it (idempotent).
+    const current = await InstitutionApplication.findById(application._id);
+    if (current?.status === "APPROVED" && current.institutionId) {
+      const existing = await Institution.findById(current.institutionId);
+      res.status(200).json({ success: true, alreadyApproved: true, application: current, institution: existing });
+      return;
+    }
+    throw error;
+  } finally {
+    await session.endSession();
+  }
+
+  // shortcut: email is sent right after commit, not through an outbox worker; if it fails the admin
+  // still sees the link (non-production). Add an outbox before production (P09).
+  const activationUrl = buildActivationUrl(activation.token);
+  let delivery = "not_configured";
+  try {
+    const result = await sendActivationEmail({ to: application.email, name: application.contactName, activationUrl });
+    delivery = result.delivered ? "sent" : result.provider;
+  } catch (error) {
+    delivery = "failed";
+    console.error("Activation email delivery failed:", error.message);
+  }
+
+  await audit(req, {
+    action: "admin.application.approve",
+    institutionId: institution._id,
+    targetType: "InstitutionApplication",
+    targetId: application._id,
+    summary: `Approved ${application.name} (${application.code}); invited ${application.contactName} as head`,
+    details: { emailDelivery: delivery },
+  });
+
+  const approved = await InstitutionApplication.findById(application._id);
+  res.status(201).json({
+    success: true,
+    application: approved,
+    institution,
+    emailDelivery: delivery,
+    ...(process.env.NODE_ENV !== "production" && { activationUrl }),
+  });
+});
+
+export const rejectApplication = asyncHandler(async (req, res) => {
+  const reason = field(req.body, "reason", { required: true, max: 1000 });
+  const { _id } = await loadApplication(req.params.applicationId);
+  const application = await InstitutionApplication.findOneAndUpdate(
+    { _id, status: "PENDING" },
+    { status: "REJECTED", reviewedBy: req.user._id, reviewedAt: new Date(), reviewNote: reason },
+    { new: true }
+  );
+
+  if (!application) {
+    throw new AppError("Only PENDING applications can be rejected", 409);
+  }
+
+  await audit(req, {
+    action: "admin.application.reject",
+    targetType: "InstitutionApplication",
+    targetId: application._id,
+    summary: `Rejected ${application.name} (${application.code})`,
+    details: { reason },
+  });
+
+  res.status(200).json({ success: true, application });
 });

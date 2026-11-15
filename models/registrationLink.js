@@ -21,6 +21,11 @@ const RegistrationLinkSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+    // After this the link stops accepting applications (null = never, for links made before expiry existed).
+    expiresAt: {
+      type: Date,
+      default: null,
+    },
     submissionCount: {
       type: Number,
       default: 0,

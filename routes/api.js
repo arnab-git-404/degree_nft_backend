@@ -66,13 +66,6 @@ router.post(
 );
 
 // Institution routes
-// Only accounts whose role can issue credentials may create a profile (no self-promotion).
-router.post(
-  "/institution/profile",
-  protect,
-  requirePermission("nft:create"),
-  institutionController.createProfile
-);
 router.get(
   "/institution/profile",
   protect,
