@@ -95,30 +95,78 @@ export const getPublicLink = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, link: { label: link.label } });
 });
 
+export const WALLET_CONFLICT_MESSAGES = {
+  WALLET_REGISTERED: "An institution is already registered with this wallet address.",
+  WALLET_PENDING:
+    "An application with this wallet address has already been submitted and is awaiting review.",
+  // Approval refuses wallets owned by an existing account, so stop the application here.
+  WALLET_IN_USE:
+    "This wallet already belongs to a DegreeNFT account. Use a different wallet for your institution.",
+};
+
+// Why this wallet cannot apply (a WALLET_CONFLICT_MESSAGES key), or null when it is free.
+export const walletConflict = ({ institution, application, account }) => {
+  if (institution || application?.status === "APPROVED") return "WALLET_REGISTERED";
+  if (application) return "WALLET_PENDING";
+  if (account) return "WALLET_IN_USE";
+  return null;
+};
+
+const findWalletConflict = async (walletAddress) => {
+  const [institution, application, account] = await Promise.all([
+    Institution.exists({ walletAddress }),
+    InstitutionApplication.findOne({ walletAddress, status: { $ne: "REJECTED" } }).select("status"),
+    Wallet.exists({ chain: "solana", address: walletAddress }),
+  ]);
+
+  return walletConflict({ institution, application, account });
+};
+
+// Live check while the applicant types; submitApplication repeats it, so this is only a hint.
+export const checkApplicationWallet = asyncHandler(async (req, res) => {
+  await findActiveLink(req.params.token);
+  const walletAddress = String(req.params.walletAddress ?? "").trim();
+
+  if (!isValidSolanaAddress(walletAddress)) {
+    throw new AppError("walletAddress must be a valid Solana address", 400);
+  }
+
+  const conflict = await findWalletConflict(walletAddress);
+  const previouslyRejected =
+    !conflict && Boolean(await InstitutionApplication.exists({ walletAddress, status: "REJECTED" }));
+
+  res.status(200).json({
+    success: true,
+    status: conflict ?? "AVAILABLE",
+    message: conflict
+      ? WALLET_CONFLICT_MESSAGES[conflict]
+      : previouslyRejected
+        ? "A previous application from this wallet was not approved. You can submit a new one."
+        : "",
+  });
+});
+
 export const submitApplication = asyncHandler(async (req, res) => {
   const link = await findActiveLink(req.params.token);
   const application = parseApplication(req.body);
 
+  const conflict = await findWalletConflict(application.walletAddress);
+
+  if (conflict) {
+    throw new AppError(WALLET_CONFLICT_MESSAGES[conflict], 409, conflict);
+  }
+
   const [registeredInstitution, openApplication] = await Promise.all([
-    Institution.exists({
-      $or: [
-        { code: application.code },
-        { walletAddress: application.walletAddress },
-      ],
-    }),
+    Institution.exists({ code: application.code }),
     InstitutionApplication.exists({
       status: { $ne: "REJECTED" },
-      $or: [
-        { code: application.code },
-        { email: application.email },
-        { walletAddress: application.walletAddress },
-      ],
+      $or: [{ code: application.code }, { email: application.email }],
     }),
   ]);
 
   if (registeredInstitution || openApplication) {
     throw new AppError(
-      "An application or institution with this code, email or wallet address already exists.",
+      "An application or institution with this code or email already exists.",
       409
     );
   }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseApplication } from "../controllers/registrationController.js";
+import { parseApplication, walletConflict } from "../controllers/registrationController.js";
 
 const valid = {
   name: " Example Institution ",
@@ -37,6 +37,14 @@ test("rejects bad code, email and non-http website", () => {
     () => parseApplication({ ...valid, website: "javascript:alert(1)" }),
     /website must start/
   );
+});
+
+test("classifies wallet conflicts, registered first", () => {
+  assert.equal(walletConflict({}), null);
+  assert.equal(walletConflict({ institution: { _id: 1 }, application: { status: "PENDING" } }), "WALLET_REGISTERED");
+  assert.equal(walletConflict({ application: { status: "APPROVED" } }), "WALLET_REGISTERED");
+  assert.equal(walletConflict({ application: { status: "PENDING" }, account: { _id: 1 } }), "WALLET_PENDING");
+  assert.equal(walletConflict({ account: { _id: 1 } }), "WALLET_IN_USE");
 });
 
 test("rejects oversized input", () => {

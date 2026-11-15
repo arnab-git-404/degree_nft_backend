@@ -16,6 +16,10 @@ router.use("/admin", adminRoutes);
 
 // Public institution registration (no login: applicants have no account yet)
 router.get("/registration/:token", registrationController.getPublicLink);
+router.get(
+  "/registration/:token/wallet/:walletAddress",
+  registrationController.checkApplicationWallet
+);
 router.post(
   "/registration/:token/apply",
   registrationController.submitApplication
