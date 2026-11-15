@@ -14,7 +14,8 @@ import { signToken } from "../utils/jwt.js";
 import User from "../models/user.js";
 import Role from "../models/role.js";
 import Wallet from "../models/wallet.js";
-import University from "../models/university.js";
+import Institution from "../models/institution.js";
+import InstitutionMembership from "../models/institutionMembership.js";
 import NFT from "../models/nft.js";
 import StudentDetails from "../models/studentDetails.js";
 
@@ -50,17 +51,17 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     return { user, wallet, token: signToken(user) };
   };
 
-  const makeUniversity = async (owner, verificationStatus) => {
-    const university = await University.create({
+  const makeInstitution = async (owner, verificationStatus) => {
+    const institution = await Institution.create({
       userId: owner.user._id,
-      name: "Smoke University",
+      name: "Smoke Institution",
       code: `SMOKE${Date.now()}${Math.floor(Math.random() * 1000)}`,
       walletAddress: owner.wallet.address,
       walletId: owner.wallet._id,
       verificationStatus,
     });
-    created.unis.push(university._id);
-    return university;
+    created.unis.push(institution._id);
+    return institution;
   };
 
   const allocation = (studentWallet) => ({
@@ -81,9 +82,10 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
   });
 
   after(async () => {
-    await NFT.deleteMany({ universityId: { $in: created.unis } });
-    await StudentDetails.deleteMany({ universityId: { $in: created.unis } });
-    await University.deleteMany({ _id: { $in: created.unis } });
+    await InstitutionMembership.deleteMany({ $or: [{ institutionId: { $in: created.unis } }, { userId: { $in: created.users } }] });
+    await NFT.deleteMany({ institutionId: { $in: created.unis } });
+    await StudentDetails.deleteMany({ institutionId: { $in: created.unis } });
+    await Institution.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
     await Role.deleteMany({ _id: { $in: created.roles } });
@@ -172,8 +174,8 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     });
 
     test("users created from a wallet are STUDENT", async () => {
-      const owner = await makeUser("university");
-      await makeUniversity(owner, "VERIFIED");
+      const owner = await makeUser("institution");
+      await makeInstitution(owner, "VERIFIED");
       const studentWallet = Keypair.generate().publicKey.toBase58();
       await call("POST", "/create-nft-ipfsHash-allocation", { token: owner.token, body: allocation(studentWallet) });
       const wallet = await Wallet.findOne({ address: studentWallet });
@@ -283,10 +285,76 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     });
   });
 
-  describe("no self-promotion (P00-04)", () => {
-    test("student cannot create a university profile and keeps the student role", async () => {
+  describe("institutions and memberships (P02-01/P02-02)", () => {
+    test("college roles are seeded with INSTITUTION scope", async () => {
+      const names = (await Role.find({ scope: "INSTITUTION" })).map((role) => role.name);
+      for (const name of ["institution_admin", "registrar", "staff"]) assert.ok(names.includes(name), name);
+    });
+
+    test("creating a college profile makes the creator its ACTIVE head", async () => {
+      const owner = await makeUser("institution");
+      const response = await call("POST", "/institution/profile", {
+        token: owner.token,
+        body: { name: "Head U", code: `HEAD${Date.now()}`, walletAddress: owner.wallet.address },
+      });
+      assert.equal(response.status, 201);
+      created.unis.push(response.body.institution._id);
+
+      const institution = await Institution.findById(response.body.institution._id);
+      assert.equal(institution.institutionType, "COLLEGE");
+      assert.equal(institution.status, "ACTIVE");
+
+      const membership = await InstitutionMembership.findById(institution.primaryAdminMembershipId).populate("roleId");
+      assert.ok(membership.userId.equals(owner.user._id));
+      assert.ok(membership.institutionId.equals(institution._id));
+      assert.equal(membership.roleId.name, "institution_admin");
+      assert.equal(membership.status, "ACTIVE");
+    });
+
+    test("membership rejects a platform role and duplicate (user, institution)", async () => {
+      const owner = await makeUser("institution");
+      const institution = await makeInstitution(owner, "VERIFIED");
+      const platformRole = await Role.findOne({ name: "admin" });
+      await assert.rejects(
+        InstitutionMembership.create({ userId: owner.user._id, institutionId: institution._id, roleId: platformRole._id }),
+        /INSTITUTION-scoped/
+      );
+
+      const registrar = await Role.findOne({ name: "registrar" });
+      await InstitutionMembership.create({ userId: owner.user._id, institutionId: institution._id, roleId: registrar._id });
+      await assert.rejects(
+        InstitutionMembership.create({ userId: owner.user._id, institutionId: institution._id, roleId: registrar._id }),
+        /duplicate key/
+      );
+    });
+
+    test("a college role cannot be put on a user's account", async () => {
+      const admin = await makeUser("admin");
+      const target = await makeUser("student");
+      const response = await call("PATCH", `/admin/users/${target.user._id}/role`, {
+        token: admin.token,
+        body: { role: "registrar" },
+      });
+      assert.equal(response.status, 400);
+    });
+
+    test("a SUSPENDED college cannot issue credentials", async () => {
       const student = await makeUser("student");
-      const response = await call("POST", "/university/profile", {
+      const owner = await makeUser("institution");
+      const institution = await makeInstitution(owner, "VERIFIED");
+      await Institution.updateOne({ _id: institution._id }, { status: "SUSPENDED" });
+      const response = await call("POST", "/create-nft-ipfsHash-allocation", {
+        token: owner.token,
+        body: allocation(student.wallet.address),
+      });
+      assert.equal(response.status, 403);
+    });
+  });
+
+  describe("no self-promotion (P00-04)", () => {
+    test("student cannot create an institution profile and keeps the student role", async () => {
+      const student = await makeUser("student");
+      const response = await call("POST", "/institution/profile", {
         token: student.token,
         body: { name: "Evil U", code: `EVIL${Date.now()}`, walletAddress: student.wallet.address },
       });
@@ -295,14 +363,14 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal(reloaded.roleId.name, "student");
     });
 
-    test("university-role user can still create a profile", async () => {
-      const university = await makeUser("university");
-      const response = await call("POST", "/university/profile", {
-        token: university.token,
-        body: { name: "Smoke U", code: `SMOKEP${Date.now()}`, walletAddress: university.wallet.address },
+    test("institution-role user can still create a profile", async () => {
+      const institution = await makeUser("institution");
+      const response = await call("POST", "/institution/profile", {
+        token: institution.token,
+        body: { name: "Smoke U", code: `SMOKEP${Date.now()}`, walletAddress: institution.wallet.address },
       });
       assert.equal(response.status, 201);
-      created.unis.push(response.body.university._id);
+      created.unis.push(response.body.institution._id);
     });
 
     test("a custom-named role with nft:create can create a profile (name never matters)", async () => {
@@ -313,26 +381,26 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       });
       created.roles.push(customRole._id);
       const registrar = await makeUser(customRole.name);
-      const response = await call("POST", "/university/profile", {
+      const response = await call("POST", "/institution/profile", {
         token: registrar.token,
         body: { name: "Smoke Reg U", code: `SMOKER${Date.now()}`, walletAddress: registrar.wallet.address },
       });
       assert.equal(response.status, 201);
-      created.unis.push(response.body.university._id);
+      created.unis.push(response.body.institution._id);
     });
 
-    test("only a VERIFIED university can allocate credentials", async () => {
+    test("only a VERIFIED institution can allocate credentials", async () => {
       const student = await makeUser("student");
-      const pendingOwner = await makeUser("university");
-      await makeUniversity(pendingOwner, "PENDING");
+      const pendingOwner = await makeUser("institution");
+      await makeInstitution(pendingOwner, "PENDING");
       const pending = await call("POST", "/create-nft-ipfsHash-allocation", {
         token: pendingOwner.token,
         body: allocation(student.wallet.address),
       });
       assert.equal(pending.status, 403);
 
-      const verifiedOwner = await makeUser("university");
-      await makeUniversity(verifiedOwner, "VERIFIED");
+      const verifiedOwner = await makeUser("institution");
+      await makeInstitution(verifiedOwner, "VERIFIED");
       const verified = await call("POST", "/create-nft-ipfsHash-allocation", {
         token: verifiedOwner.token,
         body: allocation(student.wallet.address),
@@ -353,8 +421,8 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
 
     test("confirm-mint rejects a mint address that is not on-chain", async () => {
       const student = await makeUser("student");
-      const owner = await makeUser("university");
-      const university = await makeUniversity(owner, "VERIFIED");
+      const owner = await makeUser("institution");
+      const institution = await makeInstitution(owner, "VERIFIED");
       await call("POST", "/create-nft-ipfsHash-allocation", {
         token: owner.token,
         body: allocation(student.wallet.address),
@@ -369,7 +437,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       });
       assert.equal(response.status, 400);
 
-      const row = await NFT.findOne({ universityId: university._id });
+      const row = await NFT.findOne({ institutionId: institution._id });
       assert.equal(row.minted, false);
     });
   });

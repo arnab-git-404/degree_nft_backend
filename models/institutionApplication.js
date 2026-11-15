@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 
-// An application exists before any account or wallet, so it is kept apart from University.
-const UniversityApplicationSchema = new mongoose.Schema(
+// An application exists before any account or wallet, so it is kept apart from Institution.
+const InstitutionApplicationSchema = new mongoose.Schema(
   {
     linkId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -45,6 +45,6 @@ const UniversityApplicationSchema = new mongoose.Schema(
 );
 
 export default mongoose.model(
-  "UniversityApplication",
-  UniversityApplicationSchema,
+  "InstitutionApplication",
+  InstitutionApplicationSchema,
 );

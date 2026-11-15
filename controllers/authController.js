@@ -82,7 +82,7 @@ const populateUser = async (user) => {
     { path: "roleId" },
     { path: "wallets" },
     { path: "primaryWallet" },
-    { path: "university" },
+    { path: "institution" },
     { path: "studentProfiles" },
   ]);
 

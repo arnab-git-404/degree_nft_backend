@@ -1,8 +1,10 @@
-import University from "../models/university.js";
+import Institution from "../models/institution.js";
 import Wallet from "../models/wallet.js";
+import Role from "../models/role.js";
+import InstitutionMembership from "../models/institutionMembership.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
-import { backfillUniversityReferences } from "../services/userWalletService.js";
+import { backfillInstitutionReferences } from "../services/userWalletService.js";
 
 export const createProfile = asyncHandler(async (req, res) => {
   const {
@@ -17,12 +19,12 @@ export const createProfile = asyncHandler(async (req, res) => {
     accreditation,
   } = req.body;
 
-  const existingProfile = await University.findOne({ userId: req.user._id });
+  const existingProfile = await Institution.findOne({ userId: req.user._id });
 
   if (existingProfile) {
     res.status(200).json({
       success: true,
-      university: existingProfile,
+      institution: existingProfile,
       user: req.user.toJSON(),
     });
     return;
@@ -33,10 +35,10 @@ export const createProfile = asyncHandler(async (req, res) => {
   }
 
   const normalizedCode = String(code).trim().toUpperCase();
-  const duplicateCode = await University.findOne({ code: normalizedCode });
+  const duplicateCode = await Institution.findOne({ code: normalizedCode });
 
   if (duplicateCode) {
-    throw new AppError("A university with this code already exists", 409);
+    throw new AppError("An institution with this code already exists", 409);
   }
 
   let wallet;
@@ -60,12 +62,12 @@ export const createProfile = asyncHandler(async (req, res) => {
 
   if (!wallet) {
     throw new AppError(
-      "Link a wallet to your account before creating a university profile",
+      "Link a wallet to your account before creating an institution profile",
       400
     );
   }
 
-  const profile = await University.create({
+  const profile = await Institution.create({
     userId: req.user._id,
     name: String(name).trim(),
     code: normalizedCode,
@@ -79,25 +81,40 @@ export const createProfile = asyncHandler(async (req, res) => {
     accreditation,
   });
 
-  await backfillUniversityReferences(profile, wallet);
+  // shortcut: the self-serve creator becomes the college head; P03 replaces this with Super Admin appointment on approval.
+  const adminRole = await Role.findOne({ name: "institution_admin", scope: "INSTITUTION" });
+  if (!adminRole) {
+    throw new AppError("Role 'institution_admin' is not configured", 500);
+  }
+  const membership = await InstitutionMembership.create({
+    userId: req.user._id,
+    institutionId: profile._id,
+    roleId: adminRole._id,
+    status: "ACTIVE",
+    acceptedAt: new Date(),
+  });
+  profile.primaryAdminMembershipId = membership._id;
+  await profile.save();
+
+  await backfillInstitutionReferences(profile, wallet);
 
   res.status(201).json({
     success: true,
-    university: profile,
+    institution: profile,
     user: req.user.toJSON(),
   });
 });
 
 export const getProfile = asyncHandler(async (req, res) => {
-  const profile = await University.findOne({ userId: req.user._id });
+  const profile = await Institution.findOne({ userId: req.user._id });
 
   if (!profile) {
-    throw new AppError("University profile not found", 404);
+    throw new AppError("Institution profile not found", 404);
   }
 
   res.status(200).json({
     success: true,
-    university: profile,
+    institution: profile,
   });
 });
 

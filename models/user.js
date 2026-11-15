@@ -101,8 +101,8 @@ UserSchema.virtual("primaryWallet", {
   justOne: true,
 });
 
-UserSchema.virtual("university", {
-  ref: "University",
+UserSchema.virtual("institution", {
+  ref: "Institution",
   localField: "_id",
   foreignField: "userId",
   justOne: true,

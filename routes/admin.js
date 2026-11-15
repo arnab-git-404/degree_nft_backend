@@ -21,10 +21,10 @@ router.patch("/users/:userId/role", adminController.updateUserRole);
 router.patch("/users/:userId/account", adminController.updateUserAccount);
 router.patch("/users/:userId/status", adminController.updateUserStatus);
 
-router.get("/universities", adminController.getUniversities);
+router.get("/institutions", adminController.getInstitutions);
 router.patch(
-  "/universities/:universityId/status",
-  adminController.updateUniversityStatus
+  "/institutions/:institutionId/status",
+  adminController.updateInstitutionStatus
 );
 
 router.get("/nfts", adminController.getNftAllocations);

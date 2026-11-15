@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 
+export const ROLE_SCOPES = ["PLATFORM", "INSTITUTION"];
+
 const RoleSchema = new mongoose.Schema(
   {
     name: {
@@ -25,6 +27,14 @@ const RoleSchema = new mongoose.Schema(
         trim: true,
       },
     ],
+    // PLATFORM roles go on users.roleId; INSTITUTION roles go on institutionMemberships.roleId (rights in one college only).
+    scope: {
+      type: String,
+      enum: ROLE_SCOPES,
+      default: "PLATFORM",
+      required: true,
+      index: true,
+    },
     isSystem: {
       type: Boolean,
       default: false,
@@ -46,8 +56,8 @@ RoleSchema.statics.DEFAULT_ROLES = [
     isSystem: true,
   },
   {
-    name: "university",
-    displayName: "University",
+    name: "institution",
+    displayName: "Institution",
     description: "Can issue credentials and manage student allocations",
     permissions: [
       "nft:create",
@@ -64,6 +74,37 @@ RoleSchema.statics.DEFAULT_ROLES = [
     displayName: "Admin",
     description: "Full platform access",
     permissions: ["*"],
+    isSystem: true,
+  },
+  {
+    name: "institution_admin",
+    displayName: "Institution Admin",
+    description: "Head of a college: issues credentials and manages its records",
+    scope: "INSTITUTION",
+    permissions: [
+      "nft:create",
+      "nft:read",
+      "batch:upload",
+      "student:read",
+      "report:read",
+      "report:resolve",
+    ],
+    isSystem: true,
+  },
+  {
+    name: "registrar",
+    displayName: "Registrar",
+    description: "Issues credentials and reads student records in one college",
+    scope: "INSTITUTION",
+    permissions: ["nft:create", "nft:read", "student:read", "report:read"],
+    isSystem: true,
+  },
+  {
+    name: "staff",
+    displayName: "Staff",
+    description: "Reads student and credential records in one college",
+    scope: "INSTITUTION",
+    permissions: ["nft:read", "student:read"],
     isSystem: true,
   },
 ];

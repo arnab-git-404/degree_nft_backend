@@ -1,7 +1,7 @@
 import User from "../models/user.js";
 import Role from "../models/role.js";
 import Wallet from "../models/wallet.js";
-import University from "../models/university.js";
+import Institution from "../models/institution.js";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
 import StudentDetails from "../models/studentDetails.js";
@@ -10,46 +10,46 @@ import AppError from "../utils/AppError.js";
 const deriveUserName = (address) =>
   `User ${address.slice(0, 4)}...${address.slice(-4)}`;
 
-export const backfillUniversityReferences = async (university, wallet) => {
+export const backfillInstitutionReferences = async (institution, wallet) => {
   const address = wallet.address;
 
   await Promise.all([
     NFT.updateMany(
       {
-        universityWallet: address,
+        institutionWallet: address,
         $or: [
-          { universityId: { $exists: false } },
-          { universityId: null },
+          { institutionId: { $exists: false } },
+          { institutionId: null },
         ],
       },
       {
         $set: {
-          universityId: university._id,
-          universityWalletId: wallet._id,
+          institutionId: institution._id,
+          institutionWalletId: wallet._id,
         },
       }
     ),
     Reports.updateMany(
       {
-        universityWallet: address,
+        institutionWallet: address,
         $or: [
-          { universityId: { $exists: false } },
-          { universityId: null },
+          { institutionId: { $exists: false } },
+          { institutionId: null },
         ],
       },
       {
         $set: {
-          universityId: university._id,
-          universityWalletId: wallet._id,
+          institutionId: institution._id,
+          institutionWalletId: wallet._id,
         },
       }
     ),
     StudentDetails.updateMany(
-      { universityWalletAddress: address },
+      { institutionWalletAddress: address },
       {
         $set: {
-          universityId: university._id,
-          universityWalletId: wallet._id,
+          institutionId: institution._id,
+          institutionWalletId: wallet._id,
         },
       }
     ),
@@ -95,10 +95,10 @@ export const backfillWalletReferences = async (userId, wallet) => {
     ),
   ]);
 
-  const university = await University.findOne({ userId });
+  const institution = await Institution.findOne({ userId });
 
-  if (university) {
-    await backfillUniversityReferences(university, wallet);
+  if (institution) {
+    await backfillInstitutionReferences(institution, wallet);
   }
 };
 

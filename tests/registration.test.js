@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseApplication } from "../controllers/registrationController.js";
 
 const valid = {
-  name: " Example University ",
+  name: " Example Institution ",
   code: "exu-01",
   email: "Admissions@Example.edu",
   contactName: "Registrar",
@@ -13,7 +13,7 @@ const valid = {
 
 test("normalises a valid application", () => {
   const result = parseApplication(valid);
-  assert.equal(result.name, "Example University");
+  assert.equal(result.name, "Example Institution");
   assert.equal(result.code, "EXU-01");
   assert.equal(result.email, "admissions@example.edu");
 });

@@ -1,7 +1,8 @@
 import mongoose from "mongoose";
 import User, { USER_TYPES } from "../models/user.js";
 import Role from "../models/role.js";
-import University from "../models/university.js";
+import Institution from "../models/institution.js";
+import { INSTITUTION_STATUSES } from "../models/institution.js";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
 import AppError from "../utils/AppError.js";
@@ -62,6 +63,7 @@ const serializeRole = (role, userCount = 0) => {
     displayName: value.displayName,
     description: value.description || "",
     permissions: value.permissions || [],
+    scope: value.scope || "PLATFORM",
     isSystem: Boolean(value.isSystem),
     isActive: Boolean(value.isActive),
     userCount,
@@ -102,9 +104,9 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
   const [
     totalUsers,
     activeUsers,
-    totalUniversities,
-    pendingUniversities,
-    verifiedUniversities,
+    totalInstitutions,
+    pendingInstitutions,
+    verifiedInstitutions,
     totalAllocations,
     totalMinted,
     totalReports,
@@ -112,9 +114,9 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
   ] = await Promise.all([
     User.countDocuments(),
     User.countDocuments({ isActive: true }),
-    University.countDocuments(),
-    University.countDocuments({ verificationStatus: "PENDING" }),
-    University.countDocuments({ verificationStatus: "VERIFIED" }),
+    Institution.countDocuments(),
+    Institution.countDocuments({ verificationStatus: "PENDING" }),
+    Institution.countDocuments({ verificationStatus: "VERIFIED" }),
     NFT.countDocuments({ allocated: true }),
     NFT.countDocuments({ minted: true }),
     Reports.countDocuments(),
@@ -126,9 +128,9 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
     stats: {
       totalUsers,
       activeUsers,
-      totalUniversities,
-      pendingUniversities,
-      verifiedUniversities,
+      totalInstitutions,
+      pendingInstitutions,
+      verifiedInstitutions,
       totalAllocations,
       totalMinted,
       totalReports,
@@ -399,6 +401,11 @@ export const updateUserRole = asyncHandler(async (req, res) => {
     throw new AppError("Role not found", 404);
   }
 
+  // A college role on the global account would grant its rights at every college.
+  if (roleDocument.scope === "INSTITUTION") {
+    throw new AppError("College roles are assigned through a college membership, not to the account", 400);
+  }
+
   const user = await User.findById(req.params.userId);
 
   if (!user) {
@@ -482,7 +489,7 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, user: user.toJSON() });
 });
 
-export const getUniversities = asyncHandler(async (req, res) => {
+export const getInstitutions = asyncHandler(async (req, res) => {
   const { page, limit, skip } = getPagination(req.query);
   const { search, status } = req.query;
   const filter = {};
@@ -504,25 +511,25 @@ export const getUniversities = asyncHandler(async (req, res) => {
     filter.verificationStatus = status;
   }
 
-  const [universities, total] = await Promise.all([
-    University.find(filter)
+  const [institutions, total] = await Promise.all([
+    Institution.find(filter)
       .populate("userId", "name email isActive")
       .populate("walletId", "address isVerified")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
-    University.countDocuments(filter),
+    Institution.countDocuments(filter),
   ]);
 
   res.status(200).json({
     success: true,
-    universities,
+    institutions,
     pagination: paginationMeta(page, limit, total),
   });
 });
 
-export const updateUniversityStatus = asyncHandler(async (req, res) => {
-  const { verificationStatus, isActive } = req.body;
+export const updateInstitutionStatus = asyncHandler(async (req, res) => {
+  const { verificationStatus, status } = req.body;
 
   if (!["PENDING", "VERIFIED", "REJECTED"].includes(verificationStatus)) {
     throw new AppError(
@@ -533,23 +540,26 @@ export const updateUniversityStatus = asyncHandler(async (req, res) => {
 
   const update = { verificationStatus };
 
-  if (typeof isActive === "boolean") {
-    update.isActive = isActive;
+  if (status !== undefined) {
+    if (!INSTITUTION_STATUSES.includes(status)) {
+      throw new AppError(`status must be one of ${INSTITUTION_STATUSES.join(", ")}`, 400);
+    }
+    update.status = status;
   }
 
-  const university = await University.findByIdAndUpdate(
-    req.params.universityId,
+  const institution = await Institution.findByIdAndUpdate(
+    req.params.institutionId,
     update,
     { new: true, runValidators: true }
   )
     .populate("userId", "name email isActive")
     .populate("walletId", "address isVerified");
 
-  if (!university) {
-    throw new AppError("University not found", 404);
+  if (!institution) {
+    throw new AppError("Institution not found", 404);
   }
 
-  res.status(200).json({ success: true, university });
+  res.status(200).json({ success: true, institution });
 });
 
 export const getNftAllocations = asyncHandler(async (req, res) => {
@@ -563,7 +573,7 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
       { name: regex },
       { ipfsHash: regex },
       { studentWallet: regex },
-      { universityWallet: regex },
+      { institutionWallet: regex },
       { nftAddress: regex },
     ];
   }
@@ -574,7 +584,7 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
 
   const [allocations, total] = await Promise.all([
     NFT.find(filter)
-      .populate("universityId", "name code")
+      .populate("institutionId", "name code")
       .populate("studentId", "name email")
       .sort({ allocatedAt: -1, createdAt: -1 })
       .skip(skip)
@@ -605,13 +615,13 @@ export const getReports = asyncHandler(async (req, res) => {
       { reportType: regex },
       { reportDetails: regex },
       { studentWallet: regex },
-      { universityWallet: regex },
+      { institutionWallet: regex },
     ];
   }
 
   const [reports, total] = await Promise.all([
     Reports.find(filter)
-      .populate("universityId", "name code")
+      .populate("institutionId", "name code")
       .populate("studentId", "name email")
       .sort({ reportedOn: -1, createdAt: -1 })
       .skip(skip)
@@ -644,7 +654,7 @@ export const resolveReport = asyncHandler(async (req, res) => {
   report.resolvedDate = new Date();
   await report.save();
   await report.populate([
-    { path: "universityId", select: "name code" },
+    { path: "institutionId", select: "name code" },
     { path: "studentId", select: "name email" },
   ]);
 

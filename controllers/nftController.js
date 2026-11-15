@@ -1,6 +1,6 @@
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
-import University from "../models/university.js";
+import Institution from "../models/institution.js";
 import Wallet from "../models/wallet.js";
 import StudentDetails from "../models/studentDetails.js";
 import AppError from "../utils/AppError.js";
@@ -60,32 +60,32 @@ const walletFilter = (wallet) => {
   return { $or: conditions };
 };
 
-const resolveUniversityReferences = async (nft) => {
-  let universityId = nft.universityId;
-  let universityWalletId = nft.universityWalletId;
+const resolveInstitutionReferences = async (nft) => {
+  let institutionId = nft.institutionId;
+  let institutionWalletId = nft.institutionWalletId;
 
-  if (!universityId && nft.universityWallet) {
-    const university = await University.findOne({
-      walletAddress: nft.universityWallet,
+  if (!institutionId && nft.institutionWallet) {
+    const institution = await Institution.findOne({
+      walletAddress: nft.institutionWallet,
     });
 
-    if (university) {
-      universityId = university._id;
+    if (institution) {
+      institutionId = institution._id;
     }
   }
 
-  if (!universityWalletId && nft.universityWallet) {
+  if (!institutionWalletId && nft.institutionWallet) {
     const wallet = await Wallet.findOne({
       chain: "solana",
-      address: nft.universityWallet,
+      address: nft.institutionWallet,
     });
 
     if (wallet) {
-      universityWalletId = wallet._id;
+      institutionWalletId = wallet._id;
     }
   }
 
-  return { universityId, universityWalletId };
+  return { institutionId, institutionWalletId };
 };
 
 export const createNftAllocation = asyncHandler(async (req, res) => {
@@ -106,24 +106,24 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     throw new AppError("Invalid student wallet address", 400);
   }
 
-  let university;
+  let institution;
 
-  if (hasPermission(req.user, "platform:manage") && req.body.universityId) {
-    university = await University.findById(req.body.universityId);
+  if (hasPermission(req.user, "platform:manage") && req.body.institutionId) {
+    institution = await Institution.findById(req.body.institutionId);
   } else {
-    university = await University.findOne({ userId: req.user._id });
+    institution = await Institution.findOne({ userId: req.user._id });
   }
 
-  if (!university) {
+  if (!institution) {
     throw new AppError(
-      "University profile not found. Create a university profile first.",
+      "Institution profile not found. Create an institution profile first.",
       400
     );
   }
 
-  if (university.verificationStatus !== "VERIFIED" || !university.isActive) {
+  if (institution.verificationStatus !== "VERIFIED" || institution.status !== "ACTIVE") {
     throw new AppError(
-      "University must be verified and active before issuing credentials",
+      "Institution must be verified and active before issuing credentials",
       403
     );
   }
@@ -132,8 +132,8 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     ipfsHash,
     studentWallet,
     $or: [
-      { universityId: university._id },
-      { universityWallet: university.walletAddress },
+      { institutionId: institution._id },
+      { institutionWallet: institution.walletAddress },
     ],
   });
 
@@ -147,14 +147,14 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
   const { user: student, wallet: studentWalletDocument } =
     await findOrCreateUserByWallet(studentWallet);
 
-  const universityWallet = await Wallet.findOne({
+  const institutionWallet = await Wallet.findOne({
     chain: "solana",
-    address: university.walletAddress,
+    address: institution.walletAddress,
   });
 
-  if (universityWallet && !university.walletId) {
-    university.walletId = universityWallet._id;
-    await university.save();
+  if (institutionWallet && !institution.walletId) {
+    institution.walletId = institutionWallet._id;
+    await institution.save();
   }
 
   const allocation = await NFT.create({
@@ -162,11 +162,11 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     symbol,
     uri,
     ipfsHash,
-    universityWallet: university.walletAddress,
+    institutionWallet: institution.walletAddress,
     studentWallet,
-    universityId: university._id,
+    institutionId: institution._id,
     studentId: student._id,
-    universityWalletId: universityWallet?._id,
+    institutionWalletId: institutionWallet?._id,
     studentWalletId: studentWalletDocument._id,
     sellerFeeBasisPoints,
     allocated: true,
@@ -175,25 +175,25 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
   });
 
   await StudentDetails.findOneAndUpdate(
-    { universityId: university._id, studentId: student._id },
+    { institutionId: institution._id, studentId: student._id },
     {
       $setOnInsert: {
         studentName: student.name,
         studentWalletAddress: studentWallet,
         studentId: student._id,
-        universityId: university._id,
+        institutionId: institution._id,
         studentWalletId: studentWalletDocument._id,
-        universityWalletId: universityWallet?._id,
-        universityWalletAddress: university.walletAddress,
-        universityName: university.name,
+        institutionWalletId: institutionWallet?._id,
+        institutionWalletAddress: institution.walletAddress,
+        institutionName: institution.name,
       },
       $inc: { totalAllocatedNFTs: 1 },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
-  await University.updateOne(
-    { _id: university._id },
+  await Institution.updateOne(
+    { _id: institution._id },
     { $inc: { totalAllocated: 1 } }
   );
 
@@ -214,7 +214,7 @@ export const checkAuthorization = asyncHandler(async (req, res) => {
     ...walletFilter(wallet),
   })
     .sort({ allocatedAt: 1 })
-    .populate("universityId", "name code walletAddress");
+    .populate("institutionId", "name code walletAddress");
 
   const existingReport = await Reports.findOne(walletFilter(wallet));
 
@@ -230,7 +230,7 @@ export const checkAuthorization = asyncHandler(async (req, res) => {
         ipfsHash: unmintedAllocation.ipfsHash,
         confirmationStatus: unmintedAllocation.nftStatus,
         sellerFeeBasisPoints: unmintedAllocation.sellerFeeBasisPoints,
-        universityName: unmintedAllocation.universityId?.name || null,
+        institutionName: unmintedAllocation.institutionId?.name || null,
       },
     });
     return;
@@ -377,15 +377,15 @@ export const confirmMint = asyncHandler(async (req, res) => {
     allocation.studentWalletId = wallet._id;
   }
 
-  const { universityId, universityWalletId } =
-    await resolveUniversityReferences(allocation);
+  const { institutionId, institutionWalletId } =
+    await resolveInstitutionReferences(allocation);
 
-  if (!allocation.universityId && universityId) {
-    allocation.universityId = universityId;
+  if (!allocation.institutionId && institutionId) {
+    allocation.institutionId = institutionId;
   }
 
-  if (!allocation.universityWalletId && universityWalletId) {
-    allocation.universityWalletId = universityWalletId;
+  if (!allocation.institutionWalletId && institutionWalletId) {
+    allocation.institutionWalletId = institutionWalletId;
   }
 
   allocation.nftStatus = "MINTED";
@@ -395,17 +395,17 @@ export const confirmMint = asyncHandler(async (req, res) => {
 
   await allocation.save();
 
-  if (allocation.universityId) {
-    await University.updateOne(
-      { _id: allocation.universityId },
+  if (allocation.institutionId) {
+    await Institution.updateOne(
+      { _id: allocation.institutionId },
       { $inc: { totalMinted: 1 } }
     );
   }
 
-  if (allocation.universityId && allocation.studentId) {
+  if (allocation.institutionId && allocation.studentId) {
     await StudentDetails.updateOne(
       {
-        universityId: allocation.universityId,
+        institutionId: allocation.institutionId,
         studentId: allocation.studentId,
       },
       { $inc: { studentTotalMintedNFT: 1 } }
@@ -427,7 +427,7 @@ export const getMintedNfts = asyncHandler(async (req, res) => {
     ...walletFilter(wallet),
   })
     .sort({ mintedAt: -1 })
-    .populate("universityId", "name code walletAddress");
+    .populate("institutionId", "name code walletAddress");
 
   const formattedNfts = mintedNfts.map((nft, index) => ({
     id: index + 1,
@@ -439,7 +439,7 @@ export const getMintedNfts = asyncHandler(async (req, res) => {
     symbol: nft.symbol,
     uri: nft.uri,
     ipfsHash: nft.ipfsHash,
-    universityName: nft.universityId?.name || null,
+    institutionName: nft.institutionId?.name || null,
   }));
 
   res.status(200).json({ nfts: formattedNfts });
@@ -484,15 +484,15 @@ export const createReport = asyncHandler(async (req, res) => {
     throw new AppError("Report already exists", 409);
   }
 
-  const { universityId, universityWalletId } =
-    await resolveUniversityReferences(nft);
+  const { institutionId, institutionWalletId } =
+    await resolveInstitutionReferences(nft);
 
   const report = await Reports.create({
-    universityWallet: nft.universityWallet,
+    institutionWallet: nft.institutionWallet,
     studentWallet: wallet.address,
-    universityId: universityId || undefined,
+    institutionId: institutionId || undefined,
     studentId: nft.studentId || wallet.userId || req.user._id,
-    universityWalletId: universityWalletId || undefined,
+    institutionWalletId: institutionWalletId || undefined,
     studentWalletId: nft.studentWalletId || wallet._id || undefined,
     nftIpfsHash,
     reportType,

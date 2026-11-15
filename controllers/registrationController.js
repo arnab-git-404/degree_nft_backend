@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import mongoose from "mongoose";
 import RegistrationLink from "../models/registrationLink.js";
-import UniversityApplication from "../models/universityApplication.js";
-import University from "../models/university.js";
+import InstitutionApplication from "../models/institutionApplication.js";
+import Institution from "../models/institution.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
@@ -92,14 +92,14 @@ export const submitApplication = asyncHandler(async (req, res) => {
   const link = await findActiveLink(req.params.token);
   const application = parseApplication(req.body);
 
-  const [registeredUniversity, openApplication] = await Promise.all([
-    University.exists({
+  const [registeredInstitution, openApplication] = await Promise.all([
+    Institution.exists({
       $or: [
         { code: application.code },
         { walletAddress: application.walletAddress },
       ],
     }),
-    UniversityApplication.exists({
+    InstitutionApplication.exists({
       status: { $ne: "REJECTED" },
       $or: [
         { code: application.code },
@@ -109,14 +109,14 @@ export const submitApplication = asyncHandler(async (req, res) => {
     }),
   ]);
 
-  if (registeredUniversity || openApplication) {
+  if (registeredInstitution || openApplication) {
     throw new AppError(
-      "An application or university with this code, email or wallet address already exists.",
+      "An application or institution with this code, email or wallet address already exists.",
       409
     );
   }
 
-  await UniversityApplication.create({ ...application, linkId: link._id });
+  await InstitutionApplication.create({ ...application, linkId: link._id });
   await RegistrationLink.updateOne(
     { _id: link._id },
     { $inc: { submissionCount: 1 } }

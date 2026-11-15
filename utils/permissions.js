@@ -8,7 +8,7 @@ export const PERMISSION_GROUPS = [
         key: "platform:manage",
         label: "Admin panel",
         description:
-          "Open the admin panel: manage users, roles, universities, credentials, reports and registration links.",
+          "Open the admin panel: manage users, roles, institutions, credentials, reports and registration links.",
       },
     ],
   },

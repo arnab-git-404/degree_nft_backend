@@ -1,6 +1,6 @@
 import express from "express";
 import * as nftController from "../controllers/nftController.js";
-import * as universityController from "../controllers/universityController.js";
+import * as institutionController from "../controllers/institutionController.js";
 import * as registrationController from "../controllers/registrationController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
@@ -14,7 +14,7 @@ router.use("/auth", authRoutes);
 // Admin routes
 router.use("/admin", adminRoutes);
 
-// Public university registration (no login: applicants have no account yet)
+// Public institution registration (no login: applicants have no account yet)
 router.get("/registration/:token", registrationController.getPublicLink);
 router.post(
   "/registration/:token/apply",
@@ -65,42 +65,42 @@ router.post(
   nftController.createReport
 );
 
-// University routes
+// Institution routes
 // Only accounts whose role can issue credentials may create a profile (no self-promotion).
 router.post(
-  "/university/profile",
+  "/institution/profile",
   protect,
   requirePermission("nft:create"),
-  universityController.createProfile
+  institutionController.createProfile
 );
 router.get(
-  "/university/profile",
+  "/institution/profile",
   protect,
-  universityController.getProfile
+  institutionController.getProfile
 );
 router.post(
   "/batch-upload",
   protect,
   requirePermission("batch:upload"),
-  universityController.batchUpload
+  institutionController.batchUpload
 );
 router.get(
   "/get-all-uploaded-data",
   protect,
   requirePermission("student:read"),
-  universityController.getAllUploadedData
+  institutionController.getAllUploadedData
 );
 router.post(
   "/update-nft-allocations/:walletAddress",
   protect,
   requirePermission("nft:create"),
-  universityController.updateNftAllocations
+  institutionController.updateNftAllocations
 );
 router.get(
   "/get-reports",
   protect,
   requirePermission("report:read"),
-  universityController.getAllReports
+  institutionController.getAllReports
 );
 
 export default router;
