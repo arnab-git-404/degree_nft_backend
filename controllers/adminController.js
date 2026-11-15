@@ -1,3 +1,4 @@
+import { audit } from "../utils/audit.js";
 import mongoose from "mongoose";
 import User, { USER_TYPES } from "../models/user.js";
 import Role from "../models/role.js";
@@ -5,6 +6,7 @@ import Institution from "../models/institution.js";
 import { INSTITUTION_STATUSES } from "../models/institution.js";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
+import AuditLog, { AUDIT_SCOPES } from "../models/auditLog.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import {
@@ -233,6 +235,7 @@ export const createRole = asyncHandler(async (req, res) => {
     isActive,
     isSystem: false,
   });
+  await audit(req, { action: "admin.role.create", targetType: "Role", targetId: role._id, summary: `Created role ${role.name}`, details: { permissions: role.permissions } });
 
   res.status(201).json({
     success: true,
@@ -310,6 +313,7 @@ export const updateRole = asyncHandler(async (req, res) => {
   }
 
   await role.save();
+  await audit(req, { action: "admin.role.update", targetType: "Role", targetId: role._id, summary: `Updated role ${role.name}`, details: { changed: Object.keys(req.body || {}), permissions: role.permissions, isActive: role.isActive } });
 
   const userCount = await User.countDocuments({ roleId: role._id });
 
@@ -344,6 +348,7 @@ export const deleteRole = asyncHandler(async (req, res) => {
   }
 
   await role.deleteOne();
+  await audit(req, { action: "admin.role.delete", targetType: "Role", targetId: role._id, summary: `Deleted role ${role.name}` });
 
   res.status(200).json({
     success: true,
@@ -433,9 +438,11 @@ export const updateUserRole = asyncHandler(async (req, res) => {
     }
   }
 
+  const previousRoleId = String(user.roleId);
   user.roleId = roleDocument._id;
   await user.save();
   await user.populate(["roleId", "primaryWallet"]);
+  await audit(req, { action: "admin.user.role", targetType: "User", targetId: user._id, summary: `Changed role of ${user.name} to ${roleDocument.name}`, details: { previousRoleId, role: roleDocument.name } });
 
   res.status(200).json({ success: true, user: user.toJSON() });
 });
@@ -458,9 +465,11 @@ export const updateUserAccount = asyncHandler(async (req, res) => {
     throw new AppError("User not found", 404);
   }
 
+  const previousUserType = user.userType;
   user.userType = userType;
   await user.save();
   await user.populate(["roleId", "primaryWallet"]);
+  await audit(req, { action: "admin.user.userType", targetType: "User", targetId: user._id, summary: `Changed user type of ${user.name} to ${userType}`, details: { from: previousUserType, to: userType } });
 
   res.status(200).json({ success: true, user: user.toJSON() });
 });
@@ -485,6 +494,7 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
   user.isActive = isActive;
   await user.save();
   await user.populate(["roleId", "primaryWallet"]);
+  await audit(req, { action: "admin.user.status", targetType: "User", targetId: user._id, summary: `${isActive ? "Activated" : "Deactivated"} ${user.name}`, details: { isActive } });
 
   res.status(200).json({ success: true, user: user.toJSON() });
 });
@@ -559,6 +569,8 @@ export const updateInstitutionStatus = asyncHandler(async (req, res) => {
     throw new AppError("Institution not found", 404);
   }
 
+  await audit(req, { action: "admin.institution.status", institutionId: institution._id, targetType: "Institution", targetId: institution._id, summary: `Set ${institution.name} to ${update.verificationStatus}${update.status ? ` / ${update.status}` : ""}`, details: update });
+
   res.status(200).json({ success: true, institution });
 });
 
@@ -595,6 +607,55 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     allocations,
+    pagination: paginationMeta(page, limit, total),
+  });
+});
+
+const assertValidObjectId = (value, field) => {
+  if (!/^[a-f0-9]{24}$/i.test(String(value))) {
+    throw new AppError(`Invalid ${field}`, 400);
+  }
+};
+
+// Activity log. `type` is a scope (PLATFORM / INSTITUTION / ACCOUNT) or FAILURE for rejected attempts.
+export const getAuditLogs = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = getPagination(req.query);
+  const { type, search, institutionId, actorId } = req.query;
+  const filter = {};
+
+  if (type === "FAILURE") {
+    filter.outcome = "FAILURE";
+  } else if (AUDIT_SCOPES.includes(type)) {
+    filter.scope = type;
+  }
+
+  if (institutionId) {
+    assertValidObjectId(institutionId, "institutionId");
+    filter.institutionId = institutionId;
+  }
+
+  if (actorId) {
+    assertValidObjectId(actorId, "actorId");
+    filter.actorId = actorId;
+  }
+
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+    filter.$or = [{ action: regex }, { summary: regex }, { actorName: regex }, { targetId: regex }];
+  }
+
+  const [logs, total] = await Promise.all([
+    AuditLog.find(filter)
+      .populate("institutionId", "name code")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    AuditLog.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    logs,
     pagination: paginationMeta(page, limit, total),
   });
 });
@@ -653,6 +714,7 @@ export const resolveReport = asyncHandler(async (req, res) => {
   report.solutionDetails = String(solutionDetails).trim();
   report.resolvedDate = new Date();
   await report.save();
+  await audit(req, { action: "admin.report.resolve", institutionId: report.institutionId, targetType: "Report", targetId: report._id, summary: `Resolved report: ${report.reportType}` });
   await report.populate([
     { path: "institutionId", select: "name code" },
     { path: "studentId", select: "name email" },

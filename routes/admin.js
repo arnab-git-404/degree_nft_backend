@@ -29,6 +29,8 @@ router.patch(
 
 router.get("/nfts", adminController.getNftAllocations);
 
+router.get("/audit-logs", adminController.getAuditLogs);
+
 router.get("/registration-links", registrationController.getRegistrationLinks);
 router.post("/registration-links", registrationController.createRegistrationLink);
 router.patch(

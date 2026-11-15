@@ -16,6 +16,8 @@ import Role from "../models/role.js";
 import Wallet from "../models/wallet.js";
 import Institution from "../models/institution.js";
 import InstitutionMembership from "../models/institutionMembership.js";
+import AuditLog from "../models/auditLog.js";
+import { audit } from "../utils/audit.js";
 import NFT from "../models/nft.js";
 import StudentDetails from "../models/studentDetails.js";
 
@@ -86,6 +88,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
   });
 
   after(async () => {
+    await AuditLog.deleteMany({ $or: [{ actorId: { $in: created.users } }, { institutionId: { $in: created.unis } }, { "details.email": /^smoke-/ }, { actorId: { $exists: false }, userAgent: "node" }] });
     await InstitutionMembership.deleteMany({ $or: [{ institutionId: { $in: created.unis } }, { userId: { $in: created.users } }] });
     await NFT.deleteMany({ institutionId: { $in: created.unis } });
     await StudentDetails.deleteMany({ institutionId: { $in: created.unis } });
@@ -502,6 +505,61 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       });
       assert.equal(response.status, 200);
       assert.equal((await NFT.findById(nft._id)).isConfirmed, true);
+    });
+  });
+
+  describe("activity log (P02-06)", () => {
+    const latest = (filter) => AuditLog.findOne(filter).sort({ createdAt: -1 });
+
+    test("admin role change is logged as PLATFORM with the actor", async () => {
+      const admin = await makeUser("admin");
+      const target = await makeUser("student");
+      await call("PATCH", `/admin/users/${target.user._id}/role`, { token: admin.token, body: { role: "admin" } });
+      const log = await latest({ action: "admin.user.role", targetId: String(target.user._id) });
+      assert.equal(log.scope, "PLATFORM");
+      assert.ok(log.actorId.equals(admin.user._id));
+      assert.equal(log.details.role, "admin");
+    });
+
+    test("a failed email login is logged as FAILURE without the password", async () => {
+      const email = `smoke-audit-${Date.now()}@example.test`;
+      await call("POST", "/auth/login", { body: { email, password: "secret-guess" } });
+      const log = await latest({ action: "auth.login.email", "details.email": email });
+      assert.equal(log.outcome, "FAILURE");
+      assert.equal(log.scope, "ACCOUNT");
+      assert.ok(!JSON.stringify(log).includes("secret-guess"));
+    });
+
+    test("issuing a credential is logged against that college", async () => {
+      const student = await makeUser("student");
+      const head = await makeUser("institution");
+      const abc = await makeInstitution(head, "VERIFIED");
+      await call("POST", "/create-nft-ipfsHash-allocation", { token: head.token, institution: abc, body: allocation(student.wallet.address) });
+      const log = await latest({ action: "credential.allocate", institutionId: abc._id });
+      assert.equal(log.scope, "INSTITUTION");
+      assert.ok(log.actorId.equals(head.user._id));
+    });
+
+    test("activity log API: admin only, paginated, filterable", async () => {
+      const admin = await makeUser("admin");
+      const student = await makeUser("student");
+      assert.equal((await call("GET", "/admin/audit-logs", { token: student.token })).status, 403);
+
+      const page = await call("GET", "/admin/audit-logs?limit=2&page=1", { token: admin.token });
+      assert.equal(page.status, 200);
+      assert.equal(page.body.logs.length, 2);
+      assert.equal(page.body.pagination.limit, 2);
+      assert.ok(page.body.pagination.total >= 2);
+      assert.ok(new Date(page.body.logs[0].createdAt) >= new Date(page.body.logs[1].createdAt));
+
+      const failures = await call("GET", "/admin/audit-logs?type=FAILURE&limit=50", { token: admin.token });
+      assert.ok(failures.body.logs.every((log) => log.outcome === "FAILURE"));
+
+      assert.equal((await call("GET", "/admin/audit-logs?institutionId=bad", { token: admin.token })).status, 400);
+    });
+
+    test("a broken log write never breaks the request", async () => {
+      await assert.doesNotReject(audit({ ip: "", get: () => "" }, { action: "x", scope: "NOT_A_SCOPE" }));
     });
   });
 

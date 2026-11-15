@@ -1,3 +1,4 @@
+import { audit } from "../utils/audit.js";
 import { randomBytes } from "node:crypto";
 import mongoose from "mongoose";
 import RegistrationLink from "../models/registrationLink.js";
@@ -116,7 +117,8 @@ export const submitApplication = asyncHandler(async (req, res) => {
     );
   }
 
-  await InstitutionApplication.create({ ...application, linkId: link._id });
+  const created = await InstitutionApplication.create({ ...application, linkId: link._id });
+  await audit(req, { action: "registration.application.submit", targetType: "InstitutionApplication", targetId: created._id, summary: `Application from ${application.name} (${application.code})` });
   await RegistrationLink.updateOne(
     { _id: link._id },
     { $inc: { submissionCount: 1 } }
@@ -147,6 +149,7 @@ export const createRegistrationLink = asyncHandler(async (req, res) => {
     createdBy: req.user._id,
   });
   await link.populate("createdBy", "name email");
+  await audit(req, { action: "admin.registrationLink.create", targetType: "RegistrationLink", targetId: link._id, summary: `Created registration link "${link.label}"` });
 
   res.status(201).json({ success: true, link });
 });
@@ -178,6 +181,7 @@ export const updateRegistrationLink = asyncHandler(async (req, res) => {
 
   await link.save();
   await link.populate("createdBy", "name email");
+  await audit(req, { action: "admin.registrationLink.update", targetType: "RegistrationLink", targetId: link._id, summary: `Updated registration link "${link.label}"`, details: { isActive: link.isActive } });
 
   res.status(200).json({ success: true, link });
 });

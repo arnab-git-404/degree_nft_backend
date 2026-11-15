@@ -1,3 +1,4 @@
+import { audit } from "../utils/audit.js";
 import mongoose from "mongoose";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
@@ -185,6 +186,7 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     { _id: institution._id },
     { $inc: { totalAllocated: 1 } }
   );
+  await audit(req, { action: "credential.allocate", scope: "INSTITUTION", targetType: "Credential", targetId: allocation._id, summary: `Issued "${name}" to ${studentWallet}`, details: { ipfsHash } });
 
   res.status(201).json({
     success: true,
@@ -281,6 +283,7 @@ export const confirmCredential = asyncHandler(async (req, res) => {
   nft.confirmedAt = new Date();
 
   await nft.save();
+  await audit(req, { action: "credential.confirm", scope: "INSTITUTION", institutionId: nft.institutionId, targetType: "Credential", targetId: nft._id, summary: `Student confirmed "${nft.name}"` });
 
   res.status(200).json({
     success: true,
@@ -316,6 +319,7 @@ export const pinMetadata = asyncHandler(async (req, res) => {
   }
 
   const { IpfsHash } = await response.json();
+  await audit(req, { action: "credential.metadata.pin", scope: "INSTITUTION", targetType: "IPFS", targetId: IpfsHash, summary: `Pinned metadata for "${metadata.name}"` });
   res.status(200).json({ success: true, IpfsHash });
 });
 
@@ -409,6 +413,8 @@ export const confirmMint = asyncHandler(async (req, res) => {
     );
   }
 
+  await audit(req, { action: "credential.mint", scope: "INSTITUTION", institutionId: allocation.institutionId, targetType: "Credential", targetId: allocation._id, summary: `Minted "${allocation.name}" as ${nft_Mint_Address}` });
+
   res.status(200).json({
     success: true,
     message: "NFT data saved successfully",
@@ -496,6 +502,7 @@ export const createReport = asyncHandler(async (req, res) => {
     reportDetails,
     reportedOn: new Date(),
   });
+  await audit(req, { action: "report.create", scope: "INSTITUTION", institutionId: report.institutionId, targetType: "Report", targetId: report._id, summary: `Reported issue "${reportType}" on "${nft.name}"` });
 
   res.status(201).json({
     success: true,

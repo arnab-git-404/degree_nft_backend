@@ -1,3 +1,4 @@
+import { audit, auditFailures } from "../utils/audit.js";
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import User, { SUPER_ADMIN_ACCOUNT } from "../models/user.js";
@@ -157,7 +158,7 @@ export const requestNonce = asyncHandler(async (req, res) => {
   });
 });
 
-export const walletLogin = asyncHandler(async (req, res) => {
+export const walletLogin = asyncHandler(auditFailures("auth.login.wallet", "ACCOUNT", (req) => ({ details: { walletAddress: req.body?.walletAddress } }))(async (req, res) => {
   const {
     walletAddress,
     signature,
@@ -210,12 +211,14 @@ export const walletLogin = asyncHandler(async (req, res) => {
     throw new AppError("Your assigned role is inactive", 403);
   }
 
+  await audit(req, { action: "auth.login.wallet", scope: "ACCOUNT", actor: user, targetType: "Wallet", targetId: wallet._id, summary: `Signed in with wallet ${walletAddress}` });
+
   res.status(200).json({
     success: true,
     token: signToken(user),
     user: user.toJSON(),
   });
-});
+}));
 
 export const activateAccount = asyncHandler(async (req, res) => {
   const token = req.params.token || req.body.token;
@@ -243,6 +246,7 @@ export const activateAccount = asyncHandler(async (req, res) => {
   user.lastLoginAt = new Date();
   await user.save();
   await populateUser(user);
+  await audit(req, { action: "auth.account.activate", scope: "ACCOUNT", actor: user, targetType: "User", targetId: user._id, summary: "Activated account" });
 
   res.status(200).json({
     success: true,
@@ -276,7 +280,7 @@ export const resendActivation = asyncHandler(async (req, res) => {
   });
 });
 
-export const login = asyncHandler(async (req, res) => {
+export const login = asyncHandler(auditFailures("auth.login.email", "ACCOUNT", (req) => ({ details: { email: String(req.body?.email || "").slice(0, 200) } }))(async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -316,13 +320,14 @@ export const login = asyncHandler(async (req, res) => {
   user.lastLoginAt = new Date();
   await user.save();
   await populateUser(user);
+  await audit(req, { action: "auth.login.email", scope: "ACCOUNT", actor: user, targetType: "User", targetId: user._id, summary: "Signed in with email" });
 
   res.status(200).json({
     success: true,
     token: signToken(user),
     user: user.toJSON(),
   });
-});
+}));
 
 export const getMe = asyncHandler(async (req, res) => {
   await populateUser(req.user);
@@ -391,6 +396,7 @@ export const linkWallet = asyncHandler(async (req, res) => {
   await wallet.save();
   await backfillWalletReferences(req.user._id, wallet);
   await populateUser(req.user);
+  await audit(req, { action: "account.wallet.link", scope: "ACCOUNT", targetType: "Wallet", targetId: wallet._id, summary: `Linked wallet ${wallet.address}` });
 
   res.status(200).json({
     success: true,
@@ -417,6 +423,7 @@ export const setPrimaryWallet = asyncHandler(async (req, res) => {
   wallet.isPrimary = true;
   await wallet.save();
   await populateUser(req.user);
+  await audit(req, { action: "account.wallet.primary", scope: "ACCOUNT", targetType: "Wallet", targetId: wallet._id, summary: `Set primary wallet ${wallet.address}` });
 
   res.status(200).json({
     success: true,
@@ -464,6 +471,7 @@ export const unlinkWallet = asyncHandler(async (req, res) => {
 
   await wallet.deleteOne();
   await populateUser(req.user);
+  await audit(req, { action: "account.wallet.unlink", scope: "ACCOUNT", targetType: "Wallet", targetId: wallet._id, summary: `Unlinked wallet ${wallet.address}` });
 
   res.status(200).json({
     success: true,
@@ -496,6 +504,7 @@ export const updateProfile = asyncHandler(async (req, res) => {
   Object.assign(req.user, updates);
   await req.user.save();
   await populateUser(req.user);
+  await audit(req, { action: "account.profile.update", scope: "ACCOUNT", targetType: "User", targetId: req.user._id, summary: "Updated profile", details: { fields: Object.keys(updates) } });
 
   res.status(200).json({
     success: true,
@@ -533,6 +542,7 @@ export const changePassword = asyncHandler(async (req, res) => {
 
   user.passwordHash = await bcrypt.hash(String(newPassword), 12);
   await user.save();
+  await audit(req, { action: "account.password.change", scope: "ACCOUNT", targetType: "User", targetId: user._id, summary: "Changed password" });
 
   res.status(200).json({
     success: true,

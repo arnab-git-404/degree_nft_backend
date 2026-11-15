@@ -1,3 +1,4 @@
+import { audit } from "../utils/audit.js";
 import Institution from "../models/institution.js";
 import Wallet from "../models/wallet.js";
 import Role from "../models/role.js";
@@ -95,6 +96,7 @@ export const createProfile = asyncHandler(async (req, res) => {
   });
   profile.primaryAdminMembershipId = membership._id;
   await profile.save();
+  await audit(req, { action: "institution.create", scope: "INSTITUTION", institutionId: profile._id, targetType: "Institution", targetId: profile._id, summary: `Created institution ${profile.name} (${profile.code}); creator is its head` });
 
   await backfillInstitutionReferences(profile, wallet);
 
