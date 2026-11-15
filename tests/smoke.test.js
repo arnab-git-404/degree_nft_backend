@@ -519,6 +519,8 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal(log.scope, "PLATFORM");
       assert.ok(log.actorId.equals(admin.user._id));
       assert.equal(log.details.role, "admin");
+      assert.equal(log.method, "PATCH");
+      assert.ok(log.path.endsWith("/admin/users/:userId/role"), log.path);
     });
 
     test("a failed email login is logged as FAILURE without the password", async () => {
@@ -554,6 +556,12 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
 
       const failures = await call("GET", "/admin/audit-logs?type=FAILURE&limit=50", { token: admin.token });
       assert.ok(failures.body.logs.every((log) => log.outcome === "FAILURE"));
+
+      const patches = await call("GET", "/admin/audit-logs?method=PATCH&limit=50", { token: admin.token });
+      assert.ok(patches.body.logs.every((log) => log.method === "PATCH"));
+      // stats ignore the filter
+      assert.equal(patches.body.stats.total, page.body.stats.total);
+      assert.equal(patches.body.stats.methods.PATCH, patches.body.pagination.total);
 
       assert.equal((await call("GET", "/admin/audit-logs?institutionId=bad", { token: admin.token })).status, 400);
     });

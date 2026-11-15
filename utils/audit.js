@@ -31,6 +31,8 @@ export const audit = async (
       targetId: targetId ? String(targetId) : "",
       summary,
       details,
+      method: req.method || "",
+      path: req.route ? `${req.baseUrl}${req.route.path}` : "",
       ip: req.ip || "",
       userAgent: (req.get?.("user-agent") || "").slice(0, 300),
     });

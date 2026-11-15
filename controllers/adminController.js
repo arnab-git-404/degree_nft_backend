@@ -6,7 +6,7 @@ import Institution from "../models/institution.js";
 import { INSTITUTION_STATUSES } from "../models/institution.js";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
-import AuditLog, { AUDIT_SCOPES } from "../models/auditLog.js";
+import AuditLog, { AUDIT_METHODS, AUDIT_SCOPES } from "../models/auditLog.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import {
@@ -617,16 +617,21 @@ const assertValidObjectId = (value, field) => {
   }
 };
 
-// Activity log. `type` is a scope (PLATFORM / INSTITUTION / ACCOUNT) or FAILURE for rejected attempts.
+// Activity log. `type` is a scope (PLATFORM / INSTITUTION / ACCOUNT) or FAILURE for rejected attempts;
+// `method` is POST / PUT / PATCH / DELETE. `stats` always covers the whole log, not the current filter.
 export const getAuditLogs = asyncHandler(async (req, res) => {
   const { page, limit, skip } = getPagination(req.query);
-  const { type, search, institutionId, actorId } = req.query;
+  const { type, method, search, institutionId, actorId } = req.query;
   const filter = {};
 
   if (type === "FAILURE") {
     filter.outcome = "FAILURE";
   } else if (AUDIT_SCOPES.includes(type)) {
     filter.scope = type;
+  }
+
+  if (AUDIT_METHODS.includes(method)) {
+    filter.method = method;
   }
 
   if (institutionId) {
@@ -644,18 +649,29 @@ export const getAuditLogs = asyncHandler(async (req, res) => {
     filter.$or = [{ action: regex }, { summary: regex }, { actorName: regex }, { targetId: regex }];
   }
 
-  const [logs, total] = await Promise.all([
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const [logs, total, allLogs, failures, last24h, ...methodCounts] = await Promise.all([
     AuditLog.find(filter)
       .populate("institutionId", "name code")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
     AuditLog.countDocuments(filter),
+    AuditLog.countDocuments(),
+    AuditLog.countDocuments({ outcome: "FAILURE" }),
+    AuditLog.countDocuments({ createdAt: { $gte: dayAgo } }),
+    ...AUDIT_METHODS.map((name) => AuditLog.countDocuments({ method: name })),
   ]);
 
   res.status(200).json({
     success: true,
     logs,
+    stats: {
+      total: allLogs,
+      failures,
+      last24h,
+      methods: Object.fromEntries(AUDIT_METHODS.map((name, i) => [name, methodCounts[i]])),
+    },
     pagination: paginationMeta(page, limit, total),
   });
 });
