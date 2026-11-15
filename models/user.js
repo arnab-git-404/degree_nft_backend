@@ -108,6 +108,12 @@ UserSchema.virtual("institution", {
   justOne: true,
 });
 
+UserSchema.virtual("memberships", {
+  ref: "InstitutionMembership",
+  localField: "_id",
+  foreignField: "userId",
+});
+
 UserSchema.virtual("studentProfiles", {
   ref: "StudentDetails",
   localField: "_id",

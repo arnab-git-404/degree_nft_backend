@@ -84,6 +84,15 @@ const populateUser = async (user) => {
     { path: "primaryWallet" },
     { path: "institution" },
     { path: "studentProfiles" },
+    {
+      // Colleges this user can switch to; the server re-checks each request in requireInstitution.
+      path: "memberships",
+      match: { status: "ACTIVE" },
+      populate: [
+        { path: "institutionId", select: "name code status verificationStatus" },
+        { path: "roleId", select: "name displayName permissions scope isActive" },
+      ],
+    },
   ]);
 
   return user;

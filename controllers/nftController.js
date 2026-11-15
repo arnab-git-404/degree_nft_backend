@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
 import Institution from "../models/institution.js";
@@ -106,20 +107,8 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     throw new AppError("Invalid student wallet address", 400);
   }
 
-  let institution;
-
-  if (hasPermission(req.user, "platform:manage") && req.body.institutionId) {
-    institution = await Institution.findById(req.body.institutionId);
-  } else {
-    institution = await Institution.findOne({ userId: req.user._id });
-  }
-
-  if (!institution) {
-    throw new AppError(
-      "Institution profile not found. Create an institution profile first.",
-      400
-    );
-  }
+  // Verified by requireInstitution: the caller's active membership, never a body field.
+  const institution = req.institution;
 
   if (institution.verificationStatus !== "VERIFIED" || institution.status !== "ACTIVE") {
     throw new AppError(
@@ -266,6 +255,10 @@ export const confirmCredential = asyncHandler(async (req, res) => {
   };
 
   if (nftId) {
+    // A plain id only: an object like {"$ne": null} would act as a query operator.
+    if (!mongoose.isValidObjectId(nftId)) {
+      throw new AppError("Invalid nftId", 400);
+    }
     filter._id = nftId;
   }
 
@@ -342,6 +335,10 @@ export const confirmMint = asyncHandler(async (req, res) => {
   };
 
   if (nftId) {
+    // A plain id only: an object like {"$ne": null} would act as a query operator.
+    if (!mongoose.isValidObjectId(nftId)) {
+      throw new AppError("Invalid nftId", 400);
+    }
     filter._id = nftId;
   }
 

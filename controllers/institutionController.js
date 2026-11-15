@@ -106,15 +106,9 @@ export const createProfile = asyncHandler(async (req, res) => {
 });
 
 export const getProfile = asyncHandler(async (req, res) => {
-  const profile = await Institution.findOne({ userId: req.user._id });
-
-  if (!profile) {
-    throw new AppError("Institution profile not found", 404);
-  }
-
   res.status(200).json({
     success: true,
-    institution: profile,
+    institution: req.institution,
   });
 });
 

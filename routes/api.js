@@ -4,7 +4,7 @@ import * as institutionController from "../controllers/institutionController.js"
 import * as registrationController from "../controllers/registrationController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
-import { protect, requirePermission } from "../middleware/auth.js";
+import { protect, requirePermission, requireInstitution } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -25,13 +25,13 @@ router.post(
 router.post(
   "/ipfs/pin-json",
   protect,
-  requirePermission("nft:create"),
+  requireInstitution("nft:create"),
   nftController.pinMetadata
 );
 router.post(
   "/create-nft-ipfsHash-allocation",
   protect,
-  requirePermission("nft:create"),
+  requireInstitution("nft:create"),
   nftController.createNftAllocation
 );
 router.get(
@@ -76,30 +76,31 @@ router.post(
 router.get(
   "/institution/profile",
   protect,
+  requireInstitution(),
   institutionController.getProfile
 );
 router.post(
   "/batch-upload",
   protect,
-  requirePermission("batch:upload"),
+  requireInstitution("batch:upload"),
   institutionController.batchUpload
 );
 router.get(
   "/get-all-uploaded-data",
   protect,
-  requirePermission("student:read"),
+  requireInstitution("student:read"),
   institutionController.getAllUploadedData
 );
 router.post(
   "/update-nft-allocations/:walletAddress",
   protect,
-  requirePermission("nft:create"),
+  requireInstitution("nft:create"),
   institutionController.updateNftAllocations
 );
 router.get(
   "/get-reports",
   protect,
-  requirePermission("report:read"),
+  requireInstitution("report:read"),
   institutionController.getAllReports
 );
 
