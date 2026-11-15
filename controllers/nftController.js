@@ -7,6 +7,7 @@ import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
 import { verifyCredentialMint } from "../utils/solana.js";
+import { hasPermission } from "../middleware/auth.js";
 import { findOrCreateUserByWallet } from "../services/userWalletService.js";
 
 const getStudentWallet = async (user, walletAddress) => {
@@ -25,7 +26,7 @@ const getStudentWallet = async (user, walletAddress) => {
       return wallet;
     }
 
-    if (user.roleId?.name === "admin") {
+    if (hasPermission(user, "platform:manage")) {
       const anyWallet = await Wallet.findOne({
         chain: "solana",
         address: walletAddress,
@@ -107,7 +108,7 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
 
   let university;
 
-  if (req.user.roleId?.name === "admin" && req.body.universityId) {
+  if (hasPermission(req.user, "platform:manage") && req.body.universityId) {
     university = await University.findById(req.body.universityId);
   } else {
     university = await University.findOne({ userId: req.user._id });

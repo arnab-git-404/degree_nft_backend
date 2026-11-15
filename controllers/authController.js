@@ -63,10 +63,18 @@ const consumeNonce = async ({
     throw new AppError("Invalid wallet signature", 401);
   }
 
-  nonceDoc.used = true;
-  await nonceDoc.save();
+  // Atomic claim: two concurrent requests replaying one signature cannot both succeed.
+  const claimed = await AuthNonce.findOneAndUpdate(
+    { _id: nonceDoc._id, used: false },
+    { used: true },
+    { new: true }
+  );
 
-  return nonceDoc;
+  if (!claimed) {
+    throw new AppError("Invalid wallet signature", 401);
+  }
+
+  return claimed;
 };
 
 const populateUser = async (user) => {

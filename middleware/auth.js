@@ -31,22 +31,13 @@ export const protect = asyncHandler(async (req, res, next) => {
   next();
 });
 
-export const authorize = (...roleNames) => (req, res, next) => {
-  const roleName = req.user?.roleId?.name;
-
-  if (!roleName || !roleNames.includes(roleName)) {
-    return next(new AppError("Forbidden", 403));
-  }
-
-  next();
+// Access is decided by the role's permissions, never by the role's name.
+export const hasPermission = (user, permission) => {
+  const permissions = user?.roleId?.permissions || [];
+  return permissions.includes("*") || permissions.includes(permission);
 };
 
-export const requirePermission =(permission) => (req, res, next) => {
-  const permissions = req.user?.roleId?.permissions || [];
-
-  if (permissions.includes("*") || permissions.includes(permission)) {
-    return next();
-  }
-
-  next(new AppError("Forbidden", 403));
-};
+export const requirePermission = (permission) => (req, res, next) =>
+  hasPermission(req.user, permission)
+    ? next()
+    : next(new AppError("Forbidden", 403));

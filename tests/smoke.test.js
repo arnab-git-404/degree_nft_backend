@@ -5,6 +5,8 @@ import { describe, test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import mongoose from "mongoose";
 import nacl from "tweetnacl";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
 import { Keypair } from "@solana/web3.js";
 import app from "../app.js";
 import seedRoles from "../utils/seedRoles.js";
@@ -181,6 +183,106 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     });
   });
 
+  describe("login hardening (P01-03)", () => {
+    test("expired token is rejected", async () => {
+      const student = await makeUser("student");
+      const expired = jwt.sign(
+        { sub: student.user._id.toString(), exp: Math.floor(Date.now() / 1000) - 60 },
+        process.env.JWT_SECRET
+      );
+      assert.equal((await call("GET", "/auth/me", { token: expired })).status, 401);
+    });
+
+    test("deactivated user's existing token stops working", async () => {
+      const student = await makeUser("student");
+      assert.equal((await call("GET", "/auth/me", { token: student.token })).status, 200);
+      await User.updateOne({ _id: student.user._id }, { isActive: false });
+      assert.equal((await call("GET", "/auth/me", { token: student.token })).status, 401);
+    });
+
+    test("email login: right password works; wrong, inactive and unverified are refused", async () => {
+      const email = `smoke-${Date.now()}@example.test`;
+      const password = "correct-horse-battery";
+      const user = await makeUser("student", {
+        email,
+        passwordHash: await bcrypt.hash(password, 4),
+        emailVerified: true,
+      });
+
+      const ok = await call("POST", "/auth/login", { body: { email, password } });
+      assert.equal(ok.status, 200);
+      assert.ok(ok.body.token);
+
+      assert.equal((await call("POST", "/auth/login", { body: { email, password: "wrong-password" } })).status, 401);
+
+      await User.updateOne({ _id: user.user._id }, { emailVerified: false });
+      assert.equal((await call("POST", "/auth/login", { body: { email, password } })).status, 403);
+
+      await User.updateOne({ _id: user.user._id }, { emailVerified: true, isActive: false });
+      assert.equal((await call("POST", "/auth/login", { body: { email, password } })).status, 403);
+    });
+  });
+
+  describe("wallet ownership proof (P01-04)", () => {
+    const signNonce = async (keypair) => {
+      const walletAddress = keypair.publicKey.toBase58();
+      const { body } = await call("POST", "/auth/nonce", { body: { walletAddress } });
+      const signature = Buffer.from(
+        nacl.sign.detached(new TextEncoder().encode(body.message), keypair.secretKey)
+      ).toString("base64");
+      return { walletAddress, signature };
+    };
+
+    test("linking a wallet needs a signature from that wallet's key", async () => {
+      const student = await makeUser("student");
+      const target = Keypair.generate();
+      const walletAddress = target.publicKey.toBase58();
+
+      // Nonce for the target wallet, signed by a different key.
+      const { body } = await call("POST", "/auth/nonce", { body: { walletAddress } });
+      const wrongSignature = Buffer.from(
+        nacl.sign.detached(new TextEncoder().encode(body.message), Keypair.generate().secretKey)
+      ).toString("base64");
+      const forged = await call("POST", "/auth/wallet/link", {
+        token: student.token,
+        body: { walletAddress, signature: wrongSignature },
+      });
+      assert.equal(forged.status, 401);
+
+      const linked = await call("POST", "/auth/wallet/link", { token: student.token, body: await signNonce(target) });
+      assert.equal(linked.status, 200);
+      const wallet = await Wallet.findOne({ address: walletAddress });
+      created.wallets.push(wallet._id);
+      assert.equal(wallet.isVerified, true);
+      assert.ok(wallet.userId.equals(student.user._id));
+    });
+
+    test("a wallet already on another account cannot be linked", async () => {
+      const owner = await makeUser("student");
+      const thief = await makeUser("student");
+      const keypair = Keypair.generate();
+      const linked = await call("POST", "/auth/wallet/link", { token: owner.token, body: await signNonce(keypair) });
+      assert.equal(linked.status, 200);
+      created.wallets.push((await Wallet.findOne({ address: keypair.publicKey.toBase58() }))._id);
+
+      const stolen = await call("POST", "/auth/wallet/link", { token: thief.token, body: await signNonce(keypair) });
+      assert.equal(stolen.status, 409);
+    });
+
+    test("one signed nonce logs in once, even when replayed concurrently", async () => {
+      const student = await makeUser("student");
+      const keypair = Keypair.generate();
+      await call("POST", "/auth/wallet/link", { token: student.token, body: await signNonce(keypair) });
+      created.wallets.push((await Wallet.findOne({ address: keypair.publicKey.toBase58() }))._id);
+
+      const proof = await signNonce(keypair);
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => call("POST", "/auth/login/wallet", { body: proof }))
+      );
+      assert.equal(results.filter((r) => r.status === 200).length, 1);
+    });
+  });
+
   describe("no self-promotion (P00-04)", () => {
     test("student cannot create a university profile and keeps the student role", async () => {
       const student = await makeUser("student");
@@ -198,6 +300,22 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const response = await call("POST", "/university/profile", {
         token: university.token,
         body: { name: "Smoke U", code: `SMOKEP${Date.now()}`, walletAddress: university.wallet.address },
+      });
+      assert.equal(response.status, 201);
+      created.unis.push(response.body.university._id);
+    });
+
+    test("a custom-named role with nft:create can create a profile (name never matters)", async () => {
+      const customRole = await Role.create({
+        name: `smoke-registrar-${Date.now()}`,
+        displayName: "Smoke Registrar",
+        permissions: ["nft:create"],
+      });
+      created.roles.push(customRole._id);
+      const registrar = await makeUser(customRole.name);
+      const response = await call("POST", "/university/profile", {
+        token: registrar.token,
+        body: { name: "Smoke Reg U", code: `SMOKER${Date.now()}`, walletAddress: registrar.wallet.address },
       });
       assert.equal(response.status, 201);
       created.unis.push(response.body.university._id);

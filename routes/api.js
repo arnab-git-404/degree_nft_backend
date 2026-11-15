@@ -4,7 +4,7 @@ import * as universityController from "../controllers/universityController.js";
 import * as registrationController from "../controllers/registrationController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
-import { protect, authorize, requirePermission } from "../middleware/auth.js";
+import { protect, requirePermission } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -66,11 +66,11 @@ router.post(
 );
 
 // University routes
-// Only accounts an admin already gave the university role may create a profile (no self-promotion).
+// Only accounts whose role can issue credentials may create a profile (no self-promotion).
 router.post(
   "/university/profile",
   protect,
-  authorize("university", "admin"),
+  requirePermission("nft:create"),
   universityController.createProfile
 );
 router.get(
