@@ -72,6 +72,20 @@ router.get(
   requireInstitution(),
   institutionController.getProfile
 );
+router.get("/institution/staff", protect, requireInstitution("staff:read"), institutionController.getStaff);
+router.post("/institution/staff", protect, requireInstitution("staff:invite"), institutionController.inviteStaff);
+router.patch(
+  "/institution/staff/:membershipId",
+  protect,
+  requireInstitution("staff:manage"),
+  institutionController.updateStaff
+);
+
+// The signed-in user's own college invitations
+router.get("/memberships/invitations", protect, institutionController.getInvitations);
+router.post("/memberships/:membershipId/accept", protect, institutionController.acceptInvitation);
+router.post("/memberships/:membershipId/decline", protect, institutionController.declineInvitation);
+
 router.post(
   "/batch-upload",
   protect,

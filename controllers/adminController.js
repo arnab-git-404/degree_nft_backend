@@ -1,13 +1,14 @@
 import { audit } from "../utils/audit.js";
 import mongoose from "mongoose";
 import User, { USER_TYPES } from "../models/user.js";
-import Role from "../models/role.js";
+import Role, { ROLE_SCOPES } from "../models/role.js";
 import Institution from "../models/institution.js";
 import { INSTITUTION_STATUSES } from "../models/institution.js";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
 import AuditLog, { AUDIT_METHODS, AUDIT_SCOPES } from "../models/auditLog.js";
 import InstitutionApplication from "../models/institutionApplication.js";
+import * as staffService from "../services/staffService.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import {
@@ -206,6 +207,12 @@ export const createRole = asyncHandler(async (req, res) => {
   const description = String(req.body.description || "").trim();
   const permissions = normalizePermissions(req.body.permissions || []);
   const isActive = req.body.isActive ?? true;
+  // Fixed at creation: PLATFORM roles go on accounts, INSTITUTION roles on college memberships.
+  const scope = req.body.scope ?? "PLATFORM";
+
+  if (!ROLE_SCOPES.includes(scope)) {
+    throw new AppError("scope must be PLATFORM or INSTITUTION", 400);
+  }
 
   if (!ROLE_NAME_PATTERN.test(name)) {
     throw new AppError(
@@ -234,6 +241,7 @@ export const createRole = asyncHandler(async (req, res) => {
     description,
     permissions,
     isActive,
+    scope,
     isSystem: false,
   });
   await audit(req, { action: "admin.role.create", targetType: "Role", targetId: role._id, summary: `Created role ${role.name}`, details: { permissions: role.permissions } });
@@ -770,4 +778,35 @@ export const resolveReport = asyncHandler(async (req, res) => {
   ]);
 
   res.status(200).json({ success: true, report });
+});
+
+// P04-04: Super Admin manages any college's members, including admin roles and the primary head.
+const loadInstitution = async (institutionId) => {
+  if (!/^[a-f0-9]{24}$/i.test(String(institutionId || ""))) {
+    throw new AppError("Invalid institutionId", 400);
+  }
+  const institution = await Institution.findById(institutionId);
+  if (!institution) throw new AppError("Institution not found", 404);
+  return institution;
+};
+
+export const getInstitutionMembers = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  res.status(200).json({ success: true, ...(await staffService.listMembers(institution, { asSuperAdmin: true })) });
+});
+
+export const inviteInstitutionMember = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  res.status(201).json({ success: true, ...(await staffService.inviteMember(req, institution, req.body, { asSuperAdmin: true })) });
+});
+
+export const updateInstitutionMember = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  const membership = await staffService.updateMember(req, institution, req.params.membershipId, req.body, { asSuperAdmin: true });
+  res.status(200).json({ success: true, membership });
+});
+
+export const transferInstitutionHead = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  res.status(200).json({ success: true, institution: await staffService.transferHead(req, institution, req.body) });
 });

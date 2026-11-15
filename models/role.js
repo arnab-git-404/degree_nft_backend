@@ -79,9 +79,12 @@ RoleSchema.statics.DEFAULT_ROLES = [
   {
     name: "institution_admin",
     displayName: "Institution Admin",
-    description: "Head of a college: issues credentials and manages its records",
+    description: "Head of a college: issues credentials, manages its records and staff",
     scope: "INSTITUTION",
     permissions: [
+      "staff:read",
+      "staff:invite",
+      "staff:manage",
       "nft:create",
       "nft:read",
       "batch:upload",

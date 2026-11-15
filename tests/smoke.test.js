@@ -697,6 +697,220 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     });
   });
 
+  describe("staff delegation (P04)", () => {
+    const tag = `${Date.now().toString(36)}${Math.floor(Math.random() * 36).toString(36)}`;
+    let seq = 0;
+    const email = () => `smoke-p4-${tag}-${(seq += 1)}@example.test`;
+    const roleId = async (name) => String((await Role.findOne({ name }))._id);
+    const tokenFor = async (userId) => signToken(await User.findById(userId).populate("roleId"));
+
+    after(async () => {
+      const users = await User.find({ email: new RegExp(`^smoke-p4-${tag}`) }).select("_id");
+      const userIds = users.map((u) => u._id);
+      await AuditLog.deleteMany({ actorId: { $in: userIds } });
+      await InstitutionMembership.deleteMany({ userId: { $in: userIds } });
+      await User.deleteMany({ _id: { $in: userIds } });
+    });
+
+    // A college whose owner is the primary head, as after P03 approval.
+    const college = async () => {
+      const head = await makeUser("student", { userType: "ADMIN" });
+      const institution = await makeInstitution(head, "VERIFIED");
+      const membership = await InstitutionMembership.findOne({ userId: head.user._id, institutionId: institution._id });
+      institution.primaryAdminMembershipId = membership._id;
+      await institution.save();
+      return { head, institution, headMembership: membership };
+    };
+
+    // Invite a new email and activate it, like the real flow; returns the new member's token and membership.
+    const inviteAndActivate = async ({ head, institution }, roleName) => {
+      const invited = await call("POST", "/institution/staff", {
+        token: head.token,
+        institution,
+        body: { email: email(), name: "Smoke Staff", roleId: await roleId(roleName) },
+      });
+      assert.equal(invited.status, 201, JSON.stringify(invited.body));
+      const token = invited.body.activationUrl.split("/").pop();
+      assert.equal((await call("POST", `/auth/activate/${token}`)).status, 200);
+      const membership = await InstitutionMembership.findById(invited.body.membership._id);
+      return { membership, token: await tokenFor(membership.userId) };
+    };
+
+    test("head invites a new person as Registrar; access starts only after activation", async () => {
+      const tenant = await college();
+      const invited = await call("POST", "/institution/staff", {
+        token: tenant.head.token,
+        institution: tenant.institution,
+        body: { email: email(), name: "Reg One", roleId: await roleId("registrar") },
+      });
+      assert.equal(invited.status, 201, JSON.stringify(invited.body));
+      assert.equal(invited.body.existingAccount, false);
+      assert.equal(invited.body.membership.status, "INVITED");
+
+      const user = await User.findById(invited.body.membership.userId);
+      assert.equal(user.userType, "STAFF");
+      const early = await tokenFor(user._id);
+      assert.equal((await call("GET", "/institution/profile", { token: early, institution: tenant.institution })).status, 403);
+
+      assert.equal((await call("POST", `/auth/activate/${invited.body.activationUrl.split("/").pop()}`)).status, 200);
+      const membership = await InstitutionMembership.findById(invited.body.membership._id);
+      assert.equal(membership.status, "ACTIVE");
+      assert.ok(membership.invitedBy.equals(tenant.head.user._id));
+
+      // A Registrar works in the college but cannot see or manage its staff.
+      const registrar = await tokenFor(user._id);
+      assert.equal((await call("GET", "/institution/profile", { token: registrar, institution: tenant.institution })).status, 200);
+      assert.equal((await call("GET", "/institution/staff", { token: registrar, institution: tenant.institution })).status, 403);
+      const reInvite = await call("POST", "/institution/staff", {
+        token: registrar,
+        institution: tenant.institution,
+        body: { email: email(), name: "X", roleId: await roleId("staff") },
+      });
+      assert.equal(reInvite.status, 403);
+
+      const list = await call("GET", "/institution/staff", { token: tenant.head.token, institution: tenant.institution });
+      assert.equal(list.status, 200);
+      assert.equal(list.body.members.length, 2);
+      assert.equal(String(list.body.primaryAdminMembershipId), String(tenant.headMembership._id));
+      assert.ok(!list.body.roles.some((role) => role.name === "institution_admin"), "head is not offered the admin role");
+    });
+
+    test("head cannot grant admin roles, platform roles, or invite into another college", async () => {
+      const tenant = await college();
+      const other = await college();
+      const body = (id) => ({ email: email(), name: "X", roleId: id });
+
+      const admin = await call("POST", "/institution/staff", { token: tenant.head.token, institution: tenant.institution, body: body(await roleId("institution_admin")) });
+      assert.equal(admin.status, 403);
+      const platform = await call("POST", "/institution/staff", { token: tenant.head.token, institution: tenant.institution, body: body(await roleId("admin")) });
+      assert.equal(platform.status, 400);
+      const foreign = await call("POST", "/institution/staff", { token: tenant.head.token, institution: other.institution, body: body(await roleId("staff")) });
+      assert.equal(foreign.status, 403);
+
+      // A custom INSTITUTION role that can manage staff counts as an admin role too.
+      const superAdmin = await makeUser("admin");
+      const custom = await call("POST", "/admin/roles", {
+        token: superAdmin.token,
+        body: { name: `smokep4${tag}`, displayName: "Deputy", permissions: ["staff:invite"], scope: "INSTITUTION" },
+      });
+      assert.equal(custom.status, 201, JSON.stringify(custom.body));
+      created.roles.push(custom.body.role._id);
+      assert.equal(custom.body.role.scope, "INSTITUTION");
+      const deputy = await call("POST", "/institution/staff", { token: tenant.head.token, institution: tenant.institution, body: body(custom.body.role._id) });
+      assert.equal(deputy.status, 403);
+      assert.equal((await call("POST", "/admin/roles", { token: superAdmin.token, body: { name: `smokep4b${tag}`, displayName: "Bad", scope: "TENANT" } })).status, 400);
+    });
+
+    test("an existing account is invited only with a verified email and must accept it itself", async () => {
+      const tenant = await college();
+      const unverifiedEmail = email();
+      await makeUser("student", { email: unverifiedEmail, emailVerified: false });
+      const refused = await call("POST", "/institution/staff", {
+        token: tenant.head.token,
+        institution: tenant.institution,
+        body: { email: unverifiedEmail, roleId: await roleId("staff") },
+      });
+      assert.equal(refused.status, 409);
+
+      const verifiedEmail = email();
+      const person = await makeUser("student", { email: verifiedEmail, emailVerified: true });
+      const invited = await call("POST", "/institution/staff", {
+        token: tenant.head.token,
+        institution: tenant.institution,
+        body: { email: verifiedEmail.toUpperCase(), roleId: await roleId("staff") },
+      });
+      assert.equal(invited.status, 201, JSON.stringify(invited.body));
+      assert.equal(invited.body.existingAccount, true);
+      assert.equal(invited.body.activationUrl, undefined);
+      assert.equal(await User.countDocuments({ email: verifiedEmail }), 1, "no duplicate account");
+
+      const id = invited.body.membership._id;
+      const stranger = await makeUser("student");
+      assert.equal((await call("POST", `/memberships/${id}/accept`, { token: stranger.token })).status, 404);
+      assert.equal((await call("POST", "/institution/staff", { token: tenant.head.token, institution: tenant.institution, body: { email: verifiedEmail, roleId: await roleId("staff") } })).status, 409);
+
+      const inbox = await call("GET", "/memberships/invitations", { token: person.token });
+      assert.equal(inbox.body.invitations.length, 1);
+      assert.equal(inbox.body.invitations[0].institutionId.code, tenant.institution.code);
+
+      assert.equal((await call("POST", `/memberships/${id}/accept`, { token: person.token })).status, 200);
+      assert.equal((await InstitutionMembership.findById(id)).status, "ACTIVE");
+      assert.equal((await call("GET", "/institution/profile", { token: person.token, institution: tenant.institution })).status, 200);
+      assert.equal((await call("POST", `/memberships/${id}/accept`, { token: person.token })).status, 404, "accept is single-use");
+
+      // Declining removes the invitation.
+      const other = await college();
+      const second = await call("POST", "/institution/staff", { token: other.head.token, institution: other.institution, body: { email: verifiedEmail, roleId: await roleId("staff") } });
+      assert.equal((await call("POST", `/memberships/${second.body.membership._id}/decline`, { token: person.token })).status, 200);
+      assert.equal(await InstitutionMembership.exists({ _id: second.body.membership._id }), null);
+    });
+
+    test("role changes and suspension take effect at once and stay inside the college", async () => {
+      const tenant = await college();
+      const registrar = await inviteAndActivate(tenant, "registrar");
+      const student = await makeUser("student");
+      const allocate = () => call("POST", "/create-nft-ipfsHash-allocation", { token: registrar.token, institution: tenant.institution, body: allocation(student.wallet.address) });
+      const patch = (id, body) => call("PATCH", `/institution/staff/${id}`, { token: tenant.head.token, institution: tenant.institution, body });
+
+      assert.equal((await allocate()).status, 201);
+      assert.equal((await patch(registrar.membership._id, { roleId: await roleId("staff") })).status, 200);
+      assert.equal((await allocate()).status, 403, "Staff role has no nft:create");
+
+      assert.equal((await patch(registrar.membership._id, { status: "SUSPENDED" })).status, 200);
+      assert.equal((await call("GET", "/institution/profile", { token: registrar.token, institution: tenant.institution })).status, 403);
+      assert.equal((await patch(registrar.membership._id, { status: "ACTIVE" })).status, 200);
+      assert.equal((await call("GET", "/institution/profile", { token: registrar.token, institution: tenant.institution })).status, 200);
+
+      // Limits: not themselves, not an admin, not another college, no skipping acceptance.
+      assert.equal((await patch(tenant.headMembership._id, { status: "SUSPENDED" })).status, 403);
+      assert.equal((await patch(registrar.membership._id, { roleId: await roleId("institution_admin") })).status, 403);
+      const other = await college();
+      const foreign = await inviteAndActivate(other, "staff");
+      assert.equal((await patch(foreign.membership._id, { status: "SUSPENDED" })).status, 404);
+      assert.equal((await InstitutionMembership.findById(foreign.membership._id)).status, "ACTIVE");
+
+      const pending = await call("POST", "/institution/staff", { token: tenant.head.token, institution: tenant.institution, body: { email: email(), name: "P", roleId: await roleId("staff") } });
+      assert.equal((await patch(pending.body.membership._id, { status: "ACTIVE" })).status, 409);
+      assert.equal((await patch(pending.body.membership._id, { status: "SUSPENDED" })).status, 200, "an invite can be cancelled");
+      assert.equal((await patch(pending.body.membership._id, { status: "ACTIVE" })).status, 409);
+    });
+
+    test("only the Super Admin promotes admins and transfers the head; the head is never left removable", async () => {
+      const tenant = await college();
+      const superAdmin = await makeUser("admin");
+      const deputy = await inviteAndActivate(tenant, "registrar");
+      const base = `/admin/institutions/${tenant.institution._id}`;
+      const transfer = (body, token = superAdmin.token) => call("POST", `${base}/head`, { token, body });
+
+      assert.equal((await transfer({ membershipId: deputy.membership._id, reason: "x" }, tenant.head.token)).status, 403);
+      assert.equal((await transfer({ membershipId: deputy.membership._id, reason: "handover" })).status, 400, "must be an admin first");
+      assert.equal((await transfer({ membershipId: deputy.membership._id })).status, 400, "reason required");
+
+      const promote = await call("PATCH", `${base}/members/${deputy.membership._id}`, { token: superAdmin.token, body: { roleId: await roleId("institution_admin") } });
+      assert.equal(promote.status, 200, JSON.stringify(promote.body));
+
+      // The current head cannot be demoted or suspended while they are the head.
+      const demoteHead = await call("PATCH", `${base}/members/${tenant.headMembership._id}`, { token: superAdmin.token, body: { roleId: await roleId("staff") } });
+      assert.equal(demoteHead.status, 409);
+      assert.equal((await call("PATCH", `${base}/members/${tenant.headMembership._id}`, { token: superAdmin.token, body: { status: "SUSPENDED" } })).status, 409);
+
+      const moved = await transfer({ membershipId: deputy.membership._id, reason: "handover" });
+      assert.equal(moved.status, 200, JSON.stringify(moved.body));
+      const institution = await Institution.findById(tenant.institution._id);
+      assert.ok(institution.primaryAdminMembershipId.equals(deputy.membership._id));
+      const log = await AuditLog.findOne({ action: "admin.institution.head.transfer", targetId: deputy.membership._id });
+      assert.equal(log.details.reason, "handover");
+      assert.equal(String(log.details.from), String(tenant.headMembership._id));
+
+      // The old head keeps their admin membership until separately changed; now that is allowed.
+      assert.equal((await call("PATCH", `${base}/members/${tenant.headMembership._id}`, { token: superAdmin.token, body: { roleId: await roleId("staff") } })).status, 200);
+      const members = await call("GET", `${base}/members`, { token: superAdmin.token });
+      assert.ok(members.body.roles.some((role) => role.name === "institution_admin"), "Super Admin is offered admin roles");
+      // The demoted old head can no longer manage anyone, least of all the new head.
+      assert.equal((await call("PATCH", `/institution/staff/${deputy.membership._id}`, { token: tenant.head.token, institution: tenant.institution, body: { status: "SUSPENDED" } })).status, 403);
+    });
+  });
+
   describe("no self-promotion (P00-04)", () => {
     test("no account can create a college by itself; the self-serve endpoint is gone (P03-06)", async () => {
       for (const roleName of ["student", "institution", "admin"]) {

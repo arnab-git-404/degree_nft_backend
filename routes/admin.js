@@ -26,6 +26,10 @@ router.patch(
   "/institutions/:institutionId/status",
   adminController.updateInstitutionStatus
 );
+router.get("/institutions/:institutionId/members", adminController.getInstitutionMembers);
+router.post("/institutions/:institutionId/members", adminController.inviteInstitutionMember);
+router.patch("/institutions/:institutionId/members/:membershipId", adminController.updateInstitutionMember);
+router.post("/institutions/:institutionId/head", adminController.transferInstitutionHead);
 
 router.get("/nfts", adminController.getNftAllocations);
 

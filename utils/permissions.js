@@ -13,6 +13,28 @@ export const PERMISSION_GROUPS = [
     ],
   },
   {
+    key: "staff",
+    label: "College staff",
+    description: "Manage the people who work in a college (institution roles only).",
+    permissions: [
+      {
+        key: "staff:read",
+        label: "View staff",
+        description: "See the college's members, their roles and invitations.",
+      },
+      {
+        key: "staff:invite",
+        label: "Invite staff",
+        description: "Invite people into the college with a role below Institution Admin.",
+      },
+      {
+        key: "staff:manage",
+        label: "Manage staff",
+        description: "Change staff roles, suspend and reactivate members (never admins).",
+      },
+    ],
+  },
+  {
     key: "credentials",
     label: "Credentials",
     description: "Issue, inspect, and confirm degree credentials.",
