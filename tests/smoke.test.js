@@ -25,6 +25,7 @@ import PlatformSetting from "../models/platformSetting.js";
 import { decryptSecret } from "../utils/secretBox.js";
 import { sendMail } from "../services/emailService.js";
 import StudentDetails from "../models/studentDetails.js";
+import Program from "../models/program.js";
 
 describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not set" }, () => {
   let server;
@@ -97,6 +98,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     await InstitutionMembership.deleteMany({ $or: [{ institutionId: { $in: created.unis } }, { userId: { $in: created.users } }] });
     await NFT.deleteMany({ institutionId: { $in: created.unis } });
     await StudentDetails.deleteMany({ institutionId: { $in: created.unis } });
+    await Program.deleteMany({ institutionId: { $in: created.unis } });
     await Institution.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
@@ -912,6 +914,92 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.ok(members.body.roles.some((role) => role.name === "institution_admin"), "Super Admin is offered admin roles");
       // The demoted old head can no longer manage anyone, least of all the new head.
       assert.equal((await call("PATCH", `/institution/staff/${deputy.membership._id}`, { token: tenant.head.token, institution: tenant.institution, body: { status: "SUSPENDED" } })).status, 403);
+    });
+  });
+
+  describe("college programs (P05-01)", () => {
+    const addMember = async (institution, roleName) => {
+      const member = await makeUser("student");
+      const role = await Role.findOne({ name: roleName });
+      await InstitutionMembership.create({ userId: member.user._id, institutionId: institution._id, roleId: role._id, status: "ACTIVE" });
+      return member;
+    };
+    const create = (actor, institution, body) => call("POST", "/institution/programs", { token: actor.token, institution, body });
+
+    before(() => Program.init()); // the unique index must exist before the duplicate checks
+
+    test("ABC offers CSE and MBA; XYZ may also use CSE; ABC cannot add CSE twice", async () => {
+      const abcHead = await makeUser("institution");
+      const abc = await makeInstitution(abcHead, "VERIFIED");
+      const xyzHead = await makeUser("institution");
+      const xyz = await makeInstitution(xyzHead, "VERIFIED");
+
+      const cse = await create(abcHead, abc, { code: "cse", name: "B.Tech Computer Science", degreeLevel: "Bachelor", durationValue: 4, durationUnit: "years" });
+      assert.equal(cse.status, 201, JSON.stringify(cse.body));
+      assert.equal(cse.body.program.code, "CSE");
+      assert.equal(cse.body.program.status, "ACTIVE");
+      assert.deepEqual([cse.body.program.durationValue, cse.body.program.durationUnit], [4, "YEARS"]);
+      // Saved as entered, never converted: 18 months stays 18 MONTHS.
+      const mba = await create(abcHead, abc, { code: "MBA", name: "Master of Business Administration", durationValue: 18, durationUnit: "MONTHS" });
+      assert.equal(mba.status, 201, JSON.stringify(mba.body));
+      assert.deepEqual([mba.body.program.durationValue, mba.body.program.durationUnit], [18, "MONTHS"]);
+      assert.equal((await create(abcHead, abc, { code: " CSE ", name: "Duplicate" })).status, 409);
+      assert.equal((await create(xyzHead, xyz, { code: "CSE", name: "XYZ Computer Science" })).status, 201);
+
+      const list = await call("GET", "/institution/programs", { token: abcHead.token, institution: abc });
+      assert.deepEqual(list.body.programs.map((p) => p.code), ["CSE", "MBA"]);
+      assert.ok(await AuditLog.exists({ action: "institution.program.create", institutionId: abc._id, targetId: cse.body.program._id }));
+    });
+
+    test("the body cannot choose the college or change the code; input is validated", async () => {
+      const head = await makeUser("institution");
+      const abc = await makeInstitution(head, "VERIFIED");
+      const xyz = await makeInstitution(await makeUser("institution"), "VERIFIED");
+
+      const created = await create(head, abc, { code: "ECE", name: "Electronics", durationValue: null, durationUnit: null, institutionId: String(xyz._id) });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      assert.equal(created.body.program.institutionId, String(abc._id));
+
+      const durations = [[4, undefined], [undefined, "YEARS"], [5.25, "YEARS"], [21, "YEARS"], [12.5, "MONTHS"], [0, "MONTHS"], [3, "WEEKS"]];
+      for (const bad of [
+        { code: "C S E", name: "x" },
+        { code: "BBA" },
+        { code: "BBA", name: "x", status: "DELETED" },
+        ...durations.map(([durationValue, durationUnit]) => ({ code: "BBA", name: "x", durationValue, durationUnit })),
+      ]) {
+        assert.equal((await create(head, abc, bad)).status, 400, JSON.stringify(bad));
+      }
+
+      const path = `/institution/programs/${created.body.program._id}`;
+      assert.equal((await call("PATCH", path, { token: head.token, institution: abc, body: { code: "EEE" } })).status, 400);
+      const updated = await call("PATCH", path, { token: head.token, institution: abc, body: { name: "Electronics & Comm.", status: "INACTIVE", durationValue: 5.5, durationUnit: "YEARS", institutionId: String(xyz._id) } });
+      assert.equal(updated.status, 200, JSON.stringify(updated.body));
+      assert.deepEqual([updated.body.program.durationValue, updated.body.program.durationUnit], [5.5, "YEARS"]);
+      assert.equal(updated.body.program.status, "INACTIVE");
+      assert.equal(updated.body.program.code, "ECE");
+      assert.equal(updated.body.program.institutionId, String(abc._id));
+      assert.ok(await AuditLog.exists({ action: "institution.program.update", institutionId: abc._id, "details.after.status": "INACTIVE" }));
+    });
+
+    test("staff only read; another college can neither read nor edit ABC's programs", async () => {
+      const head = await makeUser("institution");
+      const abc = await makeInstitution(head, "VERIFIED");
+      const xyzHead = await makeUser("institution");
+      const xyz = await makeInstitution(xyzHead, "VERIFIED");
+      const program = (await create(head, abc, { code: "CSE", name: "Computer Science" })).body.program;
+      const path = `/institution/programs/${program._id}`;
+
+      for (const roleName of ["registrar", "staff"]) {
+        const member = await addMember(abc, roleName);
+        assert.equal((await call("GET", "/institution/programs", { token: member.token, institution: abc })).body.programs.length, 1);
+        assert.equal((await create(member, abc, { code: "NEW", name: "x" })).status, 403);
+        assert.equal((await call("PATCH", path, { token: member.token, institution: abc, body: { name: "x" } })).status, 403);
+      }
+
+      assert.equal((await call("GET", "/institution/programs", { token: xyzHead.token, institution: abc })).status, 403);
+      assert.equal((await call("PATCH", path, { token: xyzHead.token, institution: xyz, body: { name: "Hijacked" } })).status, 404);
+      assert.equal((await call("GET", "/institution/programs", { token: xyzHead.token, institution: xyz })).body.programs.length, 0);
+      assert.equal((await Program.findById(program._id)).name, "Computer Science");
     });
   });
 

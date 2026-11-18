@@ -35,6 +35,28 @@ export const PERMISSION_GROUPS = [
     ],
   },
   {
+    key: "catalog",
+    label: "Academic catalog",
+    description: "The courses (programs) a college offers.",
+    permissions: [
+      {
+        key: "program:read",
+        label: "View programs",
+        description: "See the college's programs (courses).",
+      },
+      {
+        key: "program:create",
+        label: "Create programs",
+        description: "Add a program with a code unique in the college.",
+      },
+      {
+        key: "program:update",
+        label: "Update programs",
+        description: "Rename, edit details, or deactivate a program (the code stays fixed).",
+      },
+    ],
+  },
+  {
     key: "credentials",
     label: "Credentials",
     description: "Issue, inspect, and confirm degree credentials.",

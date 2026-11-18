@@ -2,6 +2,7 @@ import express from "express";
 import * as nftController from "../controllers/nftController.js";
 import * as institutionController from "../controllers/institutionController.js";
 import * as registrationController from "../controllers/registrationController.js";
+import * as programController from "../controllers/programController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
 import { protect, requirePermission, requireInstitution } from "../middleware/auth.js";
@@ -83,6 +84,16 @@ router.patch(
   protect,
   requireInstitution("staff:manage"),
   institutionController.updateStaff
+);
+
+// Academic catalog (P05)
+router.get("/institution/programs", protect, requireInstitution("program:read"), programController.listPrograms);
+router.post("/institution/programs", protect, requireInstitution("program:create"), programController.createProgram);
+router.patch(
+  "/institution/programs/:programId",
+  protect,
+  requireInstitution("program:update"),
+  programController.updateProgram
 );
 
 // The signed-in user's own college invitations

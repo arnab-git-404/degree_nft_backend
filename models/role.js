@@ -85,6 +85,9 @@ RoleSchema.statics.DEFAULT_ROLES = [
       "staff:read",
       "staff:invite",
       "staff:manage",
+      "program:read",
+      "program:create",
+      "program:update",
       "nft:create",
       "nft:read",
       "batch:upload",
@@ -99,7 +102,7 @@ RoleSchema.statics.DEFAULT_ROLES = [
     displayName: "Registrar",
     description: "Issues credentials and reads student records in one college",
     scope: "INSTITUTION",
-    permissions: ["nft:create", "nft:read", "student:read", "report:read"],
+    permissions: ["nft:create", "nft:read", "student:read", "report:read", "program:read"],
     isSystem: true,
   },
   {
@@ -107,7 +110,7 @@ RoleSchema.statics.DEFAULT_ROLES = [
     displayName: "Staff",
     description: "Reads student and credential records in one college",
     scope: "INSTITUTION",
-    permissions: ["nft:read", "student:read"],
+    permissions: ["nft:read", "student:read", "program:read"],
     isSystem: true,
   },
 ];
