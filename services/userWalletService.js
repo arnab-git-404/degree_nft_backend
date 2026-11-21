@@ -2,7 +2,7 @@ import User from "../models/user.js";
 import Role from "../models/role.js";
 import Wallet from "../models/wallet.js";
 import Institution from "../models/institution.js";
-import NFT from "../models/nft.js";
+import Credential from "../models/credential.js";
 import Reports from "../models/reports.js";
 import StudentDetails from "../models/studentDetails.js";
 import AppError from "../utils/AppError.js";
@@ -14,7 +14,7 @@ export const backfillInstitutionReferences = async (institution, wallet) => {
   const address = wallet.address;
 
   await Promise.all([
-    NFT.updateMany(
+    Credential.updateMany(
       {
         institutionWallet: address,
         $or: [
@@ -60,7 +60,7 @@ export const backfillWalletReferences = async (userId, wallet) => {
   const address = wallet.address;
 
   await Promise.all([
-    NFT.updateMany(
+    Credential.updateMany(
       {
         studentWallet: address,
         $or: [{ userId: { $exists: false } }, { userId: null }],

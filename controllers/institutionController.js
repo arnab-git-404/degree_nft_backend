@@ -1,5 +1,5 @@
 import asyncHandler from "../utils/asyncHandler.js";
-import NFT from "../models/nft.js";
+import Credential from "../models/credential.js";
 import * as staffService from "../services/staffService.js";
 import { listAuditLogs } from "../services/auditService.js";
 
@@ -12,15 +12,15 @@ export const getProfile = asyncHandler(async (req, res) => {
   });
 });
 
-// Credential counts for the batch upload stats board. Matches by wallet too, like createNftAllocation, for rows from before institutionId existed.
+// Credential counts for the batch upload stats board. Matches by wallet too, like issueCredential, for rows from before institutionId existed.
 export const getCredentialStats = asyncHandler(async (req, res) => {
   const { _id, walletAddress } = req.institution;
   const match = walletAddress
     ? { $or: [{ institutionId: _id }, { institutionWallet: walletAddress }] }
     : { institutionId: _id };
-  const groups = await NFT.aggregate([
+  const groups = await Credential.aggregate([
     { $match: match },
-    { $group: { _id: "$nftStatus", count: { $sum: 1 } } },
+    { $group: { _id: "$status", count: { $sum: 1 } } },
   ]);
   const count = (...statuses) =>
     groups.filter((group) => statuses.includes(group._id)).reduce((sum, group) => sum + group.count, 0);
@@ -53,12 +53,6 @@ export const getAllReports = async (req, res) => {
 };
 
 export const getAllUploadedData = async (req, res) => {
-  res
-    .status(200)
-    .json({ message: "This function is in the early stage of development..." });
-};
-
-export const updateNftAllocations = async (req, res) => {
   res
     .status(200)
     .json({ message: "This function is in the early stage of development..." });

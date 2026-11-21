@@ -20,8 +20,9 @@ import AuditLog from "../models/auditLog.js";
 import InstitutionApplication from "../models/institutionApplication.js";
 import RegistrationLink from "../models/registrationLink.js";
 import { audit } from "../utils/audit.js";
-import NFT from "../models/nft.js";
+import Credential from "../models/credential.js";
 import CredentialType from "../models/credentialType.js";
+import Reports from "../models/reports.js";
 import PlatformSetting from "../models/platformSetting.js";
 import { decryptSecret } from "../utils/secretBox.js";
 import { sendMail } from "../services/emailService.js";
@@ -101,7 +102,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
   after(async () => {
     await AuditLog.deleteMany({ $or: [{ actorId: { $in: created.users } }, { institutionId: { $in: created.unis } }, { "details.email": /^smoke-/ }, { actorId: { $exists: false }, userAgent: "node" }] });
     await InstitutionMembership.deleteMany({ $or: [{ institutionId: { $in: created.unis } }, { userId: { $in: created.users } }] });
-    await NFT.deleteMany({ institutionId: { $in: created.unis } });
+    await Credential.deleteMany({ institutionId: { $in: created.unis } });
     await StudentDetails.deleteMany({ institutionId: { $in: created.unis } });
     await Program.deleteMany({ institutionId: { $in: created.unis } });
     await ProgramSession.deleteMany({ institutionId: { $in: created.unis } });
@@ -109,6 +110,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     await Student.deleteMany({ institutionId: { $in: created.unis } });
     await Enrollment.deleteMany({ institutionId: { $in: created.unis } });
     await CredentialType.deleteMany({ institutionId: { $in: created.unis } });
+    await Reports.deleteMany({ institutionId: { $in: created.unis } });
     await Institution.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
@@ -201,7 +203,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const owner = await makeUser("institution");
       const institution = await makeInstitution(owner, "VERIFIED");
       const studentWallet = Keypair.generate().publicKey.toBase58();
-      await call("POST", "/create-nft-ipfsHash-allocation", { token: owner.token, institution, body: allocation(studentWallet) });
+      await call("POST", "/institution/credentials", { token: owner.token, institution, body: allocation(studentWallet) });
       const wallet = await Wallet.findOne({ address: studentWallet });
       created.wallets.push(wallet._id);
       created.users.push(wallet.userId);
@@ -348,7 +350,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const owner = await makeUser("institution");
       const institution = await makeInstitution(owner, "VERIFIED");
       await Institution.updateOne({ _id: institution._id }, { status: "SUSPENDED" });
-      const response = await call("POST", "/create-nft-ipfsHash-allocation", {
+      const response = await call("POST", "/institution/credentials", {
         token: owner.token,
         institution,
         body: allocation(student.wallet.address),
@@ -381,13 +383,13 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
 
       assert.equal((await call("GET", "/institution/profile", { token: abcHead.token, institution: abc })).body.institution._id, String(abc._id));
       assert.equal((await call("GET", "/institution/profile", { token: abcHead.token, institution: xyz })).status, 403);
-      const forged = await call("POST", "/create-nft-ipfsHash-allocation", {
+      const forged = await call("POST", "/institution/credentials", {
         token: abcHead.token,
         institution: xyz,
         body: { ...allocation(student.wallet.address), institutionId: String(xyz._id) },
       });
       assert.equal(forged.status, 403);
-      assert.equal(await NFT.countDocuments({ institutionId: xyz._id }), 0);
+      assert.equal(await Credential.countDocuments({ institutionId: xyz._id }), 0);
     });
 
     test("permissions come from the membership role at that college", async () => {
@@ -396,9 +398,9 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const registrar = await addMember(abc, "registrar");
       const staff = await addMember(abc, "staff");
 
-      // Both accounts have the plain student role; only the registrar membership grants nft:create at ABC.
-      assert.equal((await call("POST", "/create-nft-ipfsHash-allocation", { token: registrar.token, institution: abc, body: allocation(student.wallet.address) })).status, 201);
-      assert.equal((await call("POST", "/create-nft-ipfsHash-allocation", { token: staff.token, institution: abc, body: { ...allocation(student.wallet.address), ipfsHash: "QmOther" } })).status, 403);
+      // Both accounts have the plain student role; only the registrar membership grants credential:create at ABC.
+      assert.equal((await call("POST", "/institution/credentials", { token: registrar.token, institution: abc, body: allocation(student.wallet.address) })).status, 201);
+      assert.equal((await call("POST", "/institution/credentials", { token: staff.token, institution: abc, body: { ...allocation(student.wallet.address), ipfsHash: "QmOther" } })).status, 403);
     });
 
     test("INVITED and SUSPENDED memberships grant nothing", async () => {
@@ -421,7 +423,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const { body } = await call("GET", "/auth/me", { token: head.token });
       const membership = body.user.memberships.find((m) => m.institutionId._id === String(abc._id));
       assert.equal(membership.roleId.name, "institution_admin");
-      assert.ok(membership.roleId.permissions.includes("nft:create"));
+      assert.ok(membership.roleId.permissions.includes("credential:create"));
     });
   });
 
@@ -434,13 +436,13 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const xyz = await makeInstitution(xyzHead, "VERIFIED");
       const victim = await makeUser("student");
       const attacker = await makeUser("student");
-      const issued = await call("POST", "/create-nft-ipfsHash-allocation", {
+      const issued = await call("POST", "/institution/credentials", {
         token: abcHead.token,
         institution: abc,
         body: allocation(victim.wallet.address),
       });
       assert.equal(issued.status, 201);
-      const nft = await NFT.findOne({ institutionId: abc._id });
+      const nft = await Credential.findOne({ institutionId: abc._id });
       return { abc, xyz, xyzHead, victim, attacker, nft };
     };
 
@@ -451,7 +453,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
         ["GET", "/get-all-uploaded-data"],
         ["GET", "/get-reports"],
         ["POST", "/ipfs/pin-json"],
-        ["POST", "/update-nft-allocations/11111111111111111111111111111111"],
+        ["POST", "/institution/credentials/111111111111111111111111/revise"],
       ]) {
         const body = method === "POST" ? { name: "x" } : undefined;
         const response = await call(method, path, { token: xyzHead.token, institution: abc, body });
@@ -473,11 +475,11 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const { victim, attacker } = await setup();
       const wallet = victim.wallet.address;
       const attempts = [
-        ["GET", `/check-authorization/${wallet}`],
-        ["GET", `/minted-nfts/${wallet}`],
-        ["POST", "/confirm-nft-credential", { walletAddress: wallet }],
-        ["POST", "/confirm-mint", { walletAddress: wallet, nft_Mint_Address: Keypair.generate().publicKey.toBase58() }],
-        ["POST", "/report-issue", { walletAddress: wallet, nftIpfsHash: "QmSmoke", reportType: "x", reportDetails: "y" }],
+        ["GET", `/student/credentials/next/${wallet}`],
+        ["GET", `/student/credentials/minted/${wallet}`],
+        ["POST", "/student/credentials/confirm", { walletAddress: wallet }],
+        ["POST", "/student/credentials/mint", { walletAddress: wallet, nft_Mint_Address: Keypair.generate().publicKey.toBase58() }],
+        ["POST", "/student/credentials/report", { walletAddress: wallet, credentialId: "111111111111111111111111", reportType: "x", reportDetails: "y" }],
       ];
       for (const [method, path, body] of attempts) {
         const response = await call(method, path, { token: attacker.token, body });
@@ -487,21 +489,21 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
 
     test("a student cannot confirm another student's credential by its id", async () => {
       const { attacker, nft } = await setup();
-      const byId = await call("POST", "/confirm-nft-credential", { token: attacker.token, body: { nftId: String(nft._id) } });
+      const byId = await call("POST", "/student/credentials/confirm", { token: attacker.token, body: { credentialId: String(nft._id) } });
       assert.equal(byId.status, 404);
-      const injected = await call("POST", "/confirm-nft-credential", { token: attacker.token, body: { nftId: { $ne: null } } });
+      const injected = await call("POST", "/student/credentials/confirm", { token: attacker.token, body: { credentialId: { $ne: null } } });
       assert.equal(injected.status, 400);
-      assert.equal((await NFT.findById(nft._id)).isConfirmed, false);
+      assert.equal((await Credential.findById(nft._id)).isConfirmed, false);
     });
 
     test("the owner can still confirm their own credential", async () => {
       const { victim, nft } = await setup();
-      const response = await call("POST", "/confirm-nft-credential", {
+      const response = await call("POST", "/student/credentials/confirm", {
         token: victim.token,
-        body: { walletAddress: victim.wallet.address, nftId: String(nft._id), revision: 1 },
+        body: { walletAddress: victim.wallet.address, credentialId: String(nft._id), revision: 1 },
       });
       assert.equal(response.status, 200);
-      assert.equal((await NFT.findById(nft._id)).isConfirmed, true);
+      assert.equal((await Credential.findById(nft._id)).isConfirmed, true);
     });
   });
 
@@ -533,7 +535,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const student = await makeUser("student");
       const head = await makeUser("institution");
       const abc = await makeInstitution(head, "VERIFIED");
-      await call("POST", "/create-nft-ipfsHash-allocation", { token: head.token, institution: abc, body: allocation(student.wallet.address) });
+      await call("POST", "/institution/credentials", { token: head.token, institution: abc, body: allocation(student.wallet.address) });
       const log = await latest({ action: "credential.allocate", institutionId: abc._id });
       assert.equal(log.scope, "INSTITUTION");
       assert.ok(log.actorId.equals(head.user._id));
@@ -865,12 +867,12 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const tenant = await college();
       const registrar = await inviteAndActivate(tenant, "registrar");
       const student = await makeUser("student");
-      const allocate = () => call("POST", "/create-nft-ipfsHash-allocation", { token: registrar.token, institution: tenant.institution, body: allocation(student.wallet.address) });
+      const allocate = () => call("POST", "/institution/credentials", { token: registrar.token, institution: tenant.institution, body: allocation(student.wallet.address) });
       const patch = (id, body) => call("PATCH", `/institution/staff/${id}`, { token: tenant.head.token, institution: tenant.institution, body });
 
       assert.equal((await allocate()).status, 201);
       assert.equal((await patch(registrar.membership._id, { roleId: await roleId("staff") })).status, 200);
-      assert.equal((await allocate()).status, 403, "Staff role has no nft:create");
+      assert.equal((await allocate()).status, 403, "Staff role has no credential:create");
 
       assert.equal((await patch(registrar.membership._id, { status: "SUSPENDED" })).status, 200);
       assert.equal((await call("GET", "/institution/profile", { token: registrar.token, institution: tenant.institution })).status, 403);
@@ -1180,7 +1182,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
 
     test("a college makes its own role, assigns it, and permission changes apply at once", async () => {
       const abc = await tenant();
-      const role = await abc.as("POST", "/institution/roles", { displayName: "Exam Cell", permissions: ["program:read", "nft:read"] });
+      const role = await abc.as("POST", "/institution/roles", { displayName: "Exam Cell", permissions: ["program:read", "credential:read"] });
       assert.equal(role.status, 201, JSON.stringify(role.body));
       assert.equal(role.body.role.shared, false);
 
@@ -1198,7 +1200,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal((await asClerk("/institution/programs")).status, 200);
 
       // Removing a permission takes effect on the very next request.
-      assert.equal((await abc.as("PATCH", `/institution/roles/${role.body.role._id}`, { permissions: ["nft:read"] })).status, 200);
+      assert.equal((await abc.as("PATCH", `/institution/roles/${role.body.role._id}`, { permissions: ["credential:read"] })).status, 200);
       assert.equal((await asClerk("/institution/programs")).status, 403);
       assert.ok(await AuditLog.exists({ action: "institution.role.update", institutionId: abc.institution._id }));
 
@@ -1218,7 +1220,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     test("guard rails: college permissions only, no admin powers, own roles only, no clashes", async () => {
       const abc = await tenant();
       const xyz = await tenant();
-      for (const permissions of [["platform:manage"], ["staff:invite"], ["staff:manage"], ["role:manage"], ["*"], ["nft:confirm"], ["made:up"]]) {
+      for (const permissions of [["platform:manage"], ["staff:invite"], ["staff:manage"], ["role:manage"], ["*"], ["credential:confirm"], ["made:up"]]) {
         assert.equal((await abc.as("POST", "/institution/roles", { displayName: "Bad", permissions })).status, 400, permissions[0]);
       }
       assert.equal((await abc.as("POST", "/institution/roles", { displayName: "registrar", permissions: [] })).status, 409);
@@ -1530,10 +1532,10 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const rahul = (await as("POST", "/institution/students", { fullName: "Rahul", email: "rahul@example.com" })).body.student;
       const enrollment = (await as("POST", "/institution/enrollments", { studentId: rahul._id, programSessionId: batch._id })).body.enrollment;
       const student = await makeUser("student");
-      const issue = (credentialType, ipfsHash) => as("POST", "/create-nft-ipfsHash-allocation", { ...allocation(student.wallet.address), ipfsHash, enrollmentId: enrollment._id, credentialType });
+      const issue = (credentialType, ipfsHash) => as("POST", "/institution/credentials", { ...allocation(student.wallet.address), ipfsHash, enrollmentId: enrollment._id, credentialType });
       assert.equal((await issue("DEGREE", "QmDeg")).status, 201);
       assert.equal((await issue("provisional", "QmProv")).status, 201);
-      assert.equal(await NFT.countDocuments({ enrollmentId: enrollment._id }), 2);
+      assert.equal(await Credential.countDocuments({ enrollmentId: enrollment._id }), 2);
       assert.equal((await issue("NOPE", "QmNope")).status, 400);
       await as("PATCH", `/institution/credential-types/${created.body.credentialType._id}`, { status: "INACTIVE" });
       assert.equal((await issue("BONAFIDE", "QmBon")).status, 400);
@@ -1681,7 +1683,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const student = await makeUser("student");
       const pendingOwner = await makeUser("institution");
       const pendingInstitution = await makeInstitution(pendingOwner, "PENDING");
-      const pending = await call("POST", "/create-nft-ipfsHash-allocation", {
+      const pending = await call("POST", "/institution/credentials", {
         token: pendingOwner.token,
         institution: pendingInstitution,
         body: allocation(student.wallet.address),
@@ -1690,7 +1692,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
 
       const verifiedOwner = await makeUser("institution");
       const verifiedInstitution = await makeInstitution(verifiedOwner, "VERIFIED");
-      const verified = await call("POST", "/create-nft-ipfsHash-allocation", {
+      const verified = await call("POST", "/institution/credentials", {
         token: verifiedOwner.token,
         institution: verifiedInstitution,
         body: allocation(student.wallet.address),
@@ -1700,7 +1702,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
   });
 
   describe("secrets and mint handling (P00-05)", () => {
-    test("IPFS pin endpoint requires login and nft:create", async () => {
+    test("IPFS pin endpoint requires login and credential:create", async () => {
       assert.equal((await call("POST", "/ipfs/pin-json", { body: { name: "x" } })).status, 401);
       const student = await makeUser("student");
       const institution = await makeInstitution(await makeUser("institution"), "VERIFIED");
@@ -1714,24 +1716,86 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const student = await makeUser("student");
       const owner = await makeUser("institution");
       const institution = await makeInstitution(owner, "VERIFIED");
-      await call("POST", "/create-nft-ipfsHash-allocation", {
+      await call("POST", "/institution/credentials", {
         token: owner.token,
         institution,
         body: allocation(student.wallet.address),
       });
 
-      const row = await NFT.findOne({ institutionId: institution._id });
+      const row = await Credential.findOne({ institutionId: institution._id });
       const body = {
         walletAddress: student.wallet.address,
         nft_Mint_Address: Keypair.generate().publicKey.toBase58(),
-        nftId: String(row._id),
+        credentialId: String(row._id),
         revision: row.revision,
       };
       // Not confirmed yet and the review window is open: no minting.
-      assert.equal((await call("POST", "/confirm-mint", { token: student.token, body })).status, 403);
-      await NFT.updateOne({ _id: row._id }, { isConfirmed: true });
-      assert.equal((await call("POST", "/confirm-mint", { token: student.token, body })).status, 400);
-      assert.equal((await NFT.findById(row._id)).minted, false);
+      assert.equal((await call("POST", "/student/credentials/mint", { token: student.token, body })).status, 403);
+      await Credential.updateOne({ _id: row._id }, { isConfirmed: true });
+      assert.equal((await call("POST", "/student/credentials/mint", { token: student.token, body })).status, 400);
+      assert.equal((await Credential.findById(row._id)).minted, false);
+    });
+
+    test("revising a credential keeps the old revision, voids the confirmation, and an open report blocks the mint (P06-03/P06-07)", async () => {
+      const student = await makeUser("student");
+      const owner = await makeUser("institution");
+      const institution = await makeInstitution(owner, "VERIFIED");
+      const otherOwner = await makeUser("institution");
+      const other = await makeInstitution(otherOwner, "VERIFIED");
+      await call("POST", "/institution/credentials", { token: owner.token, institution, body: allocation(student.wallet.address) });
+      const nft = await Credential.findOne({ institutionId: institution._id });
+      assert.match(nft.contentHash, /^[a-f0-9]{64}$/);
+      const wallet = student.wallet.address;
+      const confirm = (revision) => call("POST", "/student/credentials/confirm", { token: student.token, body: { walletAddress: wallet, credentialId: String(nft._id), revision } });
+      assert.equal((await confirm(1)).status, 200);
+
+      const corrected = { name: "Corrected Degree", uri: "https://ipfs.io/ipfs/QmFixed", ipfsHash: "QmFixed", reason: "Wrong CGPA" };
+      const revise = (as, body) => call("POST", `/institution/credentials/${nft._id}/revise`, { token: as.owner.token, institution: as.institution, body });
+      assert.equal((await revise({ owner, institution }, { ...corrected, reason: "" })).status, 400);
+      assert.equal((await revise({ owner, institution }, { ...corrected, uri: "https://ipfs.io/ipfs/QmElse" })).status, 400);
+      assert.equal((await revise({ owner: otherOwner, institution: other }, corrected)).status, 404); // another college
+      assert.equal((await revise({ owner, institution }, corrected)).status, 200);
+
+      const revised = await Credential.findById(nft._id);
+      assert.equal(revised.revision, 2);
+      assert.equal(revised.isConfirmed, false);
+      assert.equal(revised.status, "PENDING_CONFIRMATION");
+      assert.notEqual(revised.contentHash, nft.contentHash);
+      assert.equal(revised.previousRevisions.length, 1);
+      assert.equal(revised.previousRevisions[0].ipfsHash, "QmSmoke");
+      assert.equal((await confirm(1)).status, 409); // the old confirmation cannot be reused
+      assert.equal((await confirm(2)).status, 200);
+
+      // A student's open report blocks the mint until the college resolves it.
+      const report = await call("POST", "/student/credentials/report", { token: student.token, body: { walletAddress: wallet, credentialId: String(nft._id), reportType: "Wrong grade", reportDetails: "CGPA is wrong" } });
+      assert.equal(report.status, 201, JSON.stringify(report.body));
+      const mint = () => call("POST", "/student/credentials/mint", { token: student.token, body: { walletAddress: wallet, nft_Mint_Address: Keypair.generate().publicKey.toBase58(), credentialId: String(nft._id), revision: 2 } });
+      assert.equal((await mint()).status, 409);
+      assert.equal((await Reports.findOne({ institutionId: institution._id })).credentialId.toString(), String(nft._id));
+
+      // The college's list shows the open report.
+      const list = await call("GET", "/institution/credentials", { token: owner.token, institution });
+      assert.equal(list.status, 200, JSON.stringify(list.body));
+      assert.equal(list.body.credentials.find((c) => c._id === String(nft._id)).openReports, 1);
+
+      // Revising alone does not clear the report (new metadata hash, same credential): the mint stays blocked.
+      const again = { name: "Corrected twice", uri: "https://ipfs.io/ipfs/QmTwice", ipfsHash: "QmTwice", reason: "Typo in title" };
+      assert.equal((await revise({ owner, institution }, again)).status, 200);
+      assert.equal((await confirm(3)).status, 200);
+      const mintAt = (revision) => call("POST", "/student/credentials/mint", { token: student.token, body: { walletAddress: wallet, nft_Mint_Address: Keypair.generate().publicKey.toBase58(), credentialId: String(nft._id), revision } });
+      assert.equal((await mintAt(3)).status, 409);
+
+      // Only when the college says so does the correction resolve the report.
+      const third = { name: "Final", uri: "https://ipfs.io/ipfs/QmFinal", ipfsHash: "QmFinal", reason: "Grade fixed", resolveReports: true };
+      const done = await revise({ owner, institution }, third);
+      assert.equal(done.status, 200);
+      assert.equal(done.body.resolvedReports, 1);
+      assert.equal((await Reports.findOne({ institutionId: institution._id })).resolved, true);
+      assert.equal((await confirm(4)).status, 200);
+      assert.equal((await mintAt(4)).status, 400); // past the report check: the chain check refuses the fake mint
+
+      await Credential.updateOne({ _id: nft._id }, { minted: true });
+      assert.equal((await revise({ owner, institution }, { ...corrected, ipfsHash: "QmAgain", uri: "https://ipfs.io/ipfs/QmAgain" })).status, 409);
     });
 
     test("confirming one credential leaves the student's other credentials pending (P06-06)", async () => {
@@ -1739,27 +1803,27 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const owner = await makeUser("institution");
       const institution = await makeInstitution(owner, "VERIFIED");
       for (const [type, hash] of [["DEGREE", "QmD"], ["PROVISIONAL", "QmP"]]) {
-        const issued = await call("POST", "/create-nft-ipfsHash-allocation", {
+        const issued = await call("POST", "/institution/credentials", {
           token: owner.token,
           institution,
           body: { ...allocation(student.wallet.address), ipfsHash: hash, credentialType: type },
         });
         assert.equal(issued.status, 201, JSON.stringify(issued.body));
       }
-      const [degree, provisional] = [await NFT.findOne({ ipfsHash: "QmD" }), await NFT.findOne({ ipfsHash: "QmP" })];
+      const [degree, provisional] = [await Credential.findOne({ ipfsHash: "QmD" }), await Credential.findOne({ ipfsHash: "QmP" })];
       const confirm = (nft, extra = {}) =>
-        call("POST", "/confirm-nft-credential", {
+        call("POST", "/student/credentials/confirm", {
           token: student.token,
-          body: { walletAddress: student.wallet.address, nftId: String(nft._id), revision: nft.revision, ...extra },
+          body: { walletAddress: student.wallet.address, credentialId: String(nft._id), revision: nft.revision, ...extra },
         });
 
       // An id and revision are both required: no "confirm the oldest one".
-      assert.equal((await call("POST", "/confirm-nft-credential", { token: student.token, body: { walletAddress: student.wallet.address } })).status, 400);
+      assert.equal((await call("POST", "/student/credentials/confirm", { token: student.token, body: { walletAddress: student.wallet.address } })).status, 400);
       assert.equal((await confirm(degree, { revision: 99 })).status, 409);
       assert.equal((await confirm(degree)).status, 200);
-      assert.equal((await NFT.findById(degree._id)).isConfirmed, true);
-      assert.equal((await NFT.findById(provisional._id)).isConfirmed, false);
-      assert.equal((await NFT.findById(provisional._id)).nftStatus, "PENDING_CONFIRMATION");
+      assert.equal((await Credential.findById(degree._id)).isConfirmed, true);
+      assert.equal((await Credential.findById(provisional._id)).isConfirmed, false);
+      assert.equal((await Credential.findById(provisional._id)).status, "PENDING_CONFIRMATION");
     });
   });
 });

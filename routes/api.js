@@ -1,5 +1,5 @@
 import express from "express";
-import * as nftController from "../controllers/nftController.js";
+import * as credentialController from "../controllers/credentialController.js";
 import * as institutionController from "../controllers/institutionController.js";
 import * as registrationController from "../controllers/registrationController.js";
 import * as programController from "../controllers/programController.js";
@@ -30,49 +30,16 @@ router.post(
   registrationController.submitApplication
 );
 
-// NFT routes
-router.post(
-  "/ipfs/pin-json",
-  protect,
-  requireInstitution("nft:create"),
-  nftController.pinMetadata
-);
-router.post(
-  "/create-nft-ipfsHash-allocation",
-  protect,
-  requireInstitution("nft:create"),
-  nftController.createNftAllocation
-);
-router.get(
-  "/check-authorization/:walletAddress",
-  protect,
-  requirePermission("nft:read"),
-  nftController.checkAuthorization
-);
-router.post(
-  "/confirm-mint",
-  protect,
-  requirePermission("nft:confirm"),
-  nftController.confirmMint
-);
-router.get(
-  "/minted-nfts/:walletAddress",
-  protect,
-  requirePermission("nft:read"),
-  nftController.getMintedNfts
-);
-router.post(
-  "/confirm-nft-credential",
-  protect,
-  requirePermission("nft:confirm"),
-  nftController.confirmCredential
-);
-router.post(
-  "/report-issue",
-  protect,
-  requirePermission("report:create"),
-  nftController.createReport
-);
+// Credentials: the college issues and corrects them, the student confirms and mints them
+router.post("/ipfs/pin-json", protect, requireInstitution("credential:create"), credentialController.pinMetadata);
+router.post("/institution/credentials", protect, requireInstitution("credential:create"), credentialController.issueCredential);
+router.get("/institution/credentials", protect, requireInstitution("credential:read"), credentialController.listCollegeCredentials);
+router.post("/institution/credentials/:credentialId/revise", protect, requireInstitution("credential:create"), credentialController.reviseCredential);
+router.get("/student/credentials/next/:walletAddress", protect, requirePermission("credential:read"), credentialController.getNextCredential);
+router.get("/student/credentials/minted/:walletAddress", protect, requirePermission("credential:read"), credentialController.getMintedCredentials);
+router.post("/student/credentials/confirm", protect, requirePermission("credential:confirm"), credentialController.confirmCredential);
+router.post("/student/credentials/mint", protect, requirePermission("credential:confirm"), credentialController.recordMint);
+router.post("/student/credentials/report", protect, requirePermission("report:create"), credentialController.createReport);
 
 // Institution routes
 router.get(
@@ -186,12 +153,6 @@ router.get(
   protect,
   requireInstitution("student:read"),
   institutionController.getAllUploadedData
-);
-router.post(
-  "/update-nft-allocations/:walletAddress",
-  protect,
-  requireInstitution("nft:create"),
-  institutionController.updateNftAllocations
 );
 router.get(
   "/get-reports",

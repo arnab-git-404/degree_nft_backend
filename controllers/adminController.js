@@ -4,7 +4,7 @@ import User, { USER_TYPES } from "../models/user.js";
 import Role, { ROLE_SCOPES } from "../models/role.js";
 import Institution from "../models/institution.js";
 import { INSTITUTION_STATUSES } from "../models/institution.js";
-import NFT from "../models/nft.js";
+import Credential from "../models/credential.js";
 import Reports from "../models/reports.js";
 import InstitutionApplication from "../models/institutionApplication.js";
 import InstitutionMembership from "../models/institutionMembership.js";
@@ -131,8 +131,8 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
     Institution.countDocuments(),
     Institution.countDocuments({ verificationStatus: "PENDING" }),
     Institution.countDocuments({ verificationStatus: "VERIFIED" }),
-    NFT.countDocuments({ allocated: true }),
-    NFT.countDocuments({ minted: true }),
+    Credential.countDocuments({ allocated: true }),
+    Credential.countDocuments({ minted: true }),
     Reports.countDocuments(),
     Reports.countDocuments({ resolved: false }),
   ]);
@@ -575,7 +575,7 @@ export const updateInstitutionStatus = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, institution });
 });
 
-export const getNftAllocations = asyncHandler(async (req, res) => {
+export const listCredentials = asyncHandler(async (req, res) => {
   const { page, limit, skip } = getPagination(req.query);
   const { search, minted } = req.query;
   const filter = {};
@@ -595,19 +595,19 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
     filter.minted = minted === "true";
   }
 
-  const [allocations, total] = await Promise.all([
-    NFT.find(filter)
+  const [credentials, total] = await Promise.all([
+    Credential.find(filter)
       .populate("institutionId", "name code")
       .populate("userId", "name email")
       .sort({ allocatedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit),
-    NFT.countDocuments(filter),
+    Credential.countDocuments(filter),
   ]);
 
   res.status(200).json({
     success: true,
-    allocations,
+    credentials,
     pagination: paginationMeta(page, limit, total),
   });
 });
@@ -662,7 +662,7 @@ export const getReports = asyncHandler(async (req, res) => {
   if (search) {
     const regex = new RegExp(escapeRegex(search), "i");
     filter.$or = [
-      { nftIpfsHash: regex },
+      { ipfsHash: regex },
       { reportType: regex },
       { reportDetails: regex },
       { studentWallet: regex },

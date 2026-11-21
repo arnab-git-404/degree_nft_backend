@@ -119,17 +119,17 @@ export const PERMISSION_GROUPS = [
     description: "Issue, inspect, and confirm degree credentials.",
     permissions: [
       {
-        key: "nft:read",
+        key: "credential:read",
         label: "View credentials",
         description: "Read credential allocations and minted records.",
       },
       {
-        key: "nft:create",
+        key: "credential:create",
         label: "Create allocations",
         description: "Allocate new credentials to student wallets.",
       },
       {
-        key: "nft:confirm",
+        key: "credential:confirm",
         label: "Confirm credentials",
         description: "Confirm minted credentials and student claims.",
       },
@@ -209,7 +209,7 @@ export const PERMISSION_KEY_SET = new Set(PERMISSION_KEYS);
 
 // What a college may put in its own roles: never platform rights, admin powers (staff/role management,
 // which only the Super Admin grants, P04) or a student's own actions (confirm, report).
-const NOT_FOR_COLLEGE_ROLES = new Set(["platform:manage", "staff:invite", "staff:manage", "role:manage", "nft:confirm", "report:create"]);
+const NOT_FOR_COLLEGE_ROLES = new Set(["platform:manage", "staff:invite", "staff:manage", "role:manage", "credential:confirm", "report:create"]);
 
 export const COLLEGE_PERMISSION_GROUPS = PERMISSION_GROUPS.map((group) => ({
   ...group,

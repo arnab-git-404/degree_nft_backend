@@ -29,7 +29,9 @@ const ReportSchema = new mongoose.Schema({
     ref: "Wallet",
     index: true,
   },
-  nftIpfsHash: {
+  // The credential this report is about. Stays valid when the credential is revised (its ipfsHash changes).
+  credentialId: { type: mongoose.Schema.Types.ObjectId, ref: "Credential", index: true },
+  ipfsHash: {
     type: String,
     required: true,
   },
@@ -57,4 +59,4 @@ const ReportSchema = new mongoose.Schema({
   },
 });
 
-export default mongoose.model("NFT Reports", ReportSchema);
+export default mongoose.model("Report", ReportSchema);

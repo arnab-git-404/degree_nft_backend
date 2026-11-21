@@ -59,6 +59,22 @@ const NftSchema = new mongoose.Schema({
     type: Number,
     default: 1,
   },
+  // sha256 of what the student reviews (enrollment, type, name, metadata CID) for the current revision.
+  contentHash: { type: String },
+  // Earlier revisions, kept as they were when replaced. Append-only: nothing edits an entry.
+  previousRevisions: [
+    {
+      _id: false,
+      revision: Number,
+      name: String,
+      uri: String,
+      ipfsHash: String,
+      contentHash: String,
+      confirmedAt: Date,
+      reason: String,
+      revisedAt: Date,
+    },
+  ],
   credentialType: {
     type: String,
     default: "DEGREE",
@@ -95,7 +111,7 @@ const NftSchema = new mongoose.Schema({
   nftAddress: {
     type: String,
   },
-  nftStatus: {
+  status: {
     type: String,
     enum: ["PENDING_CONFIRMATION", "CONFIRMED", "AUTO_CONFIRMED", "MINTED"],
     default: "PENDING_CONFIRMATION",
@@ -121,4 +137,4 @@ const NftSchema = new mongoose.Schema({
   },
 });
 
-export default mongoose.model("Allocated NFT Detalis", NftSchema);
+export default mongoose.model("Credential", NftSchema);
