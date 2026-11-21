@@ -245,9 +245,12 @@ export const checkAuthorization = asyncHandler(async (req, res) => {
         uri: unmintedAllocation.uri,
         ipfsHash: unmintedAllocation.ipfsHash,
         confirmationStatus: unmintedAllocation.nftStatus,
+        revision: unmintedAllocation.revision,
+        credentialType: unmintedAllocation.credentialType,
         sellerFeeBasisPoints: unmintedAllocation.sellerFeeBasisPoints,
         institutionName: unmintedAllocation.institutionId?.name || null,
       },
+      confirmationDeadline: unmintedAllocation.confirmationDeadline,
     });
     return;
   }
@@ -271,29 +274,23 @@ export const checkAuthorization = asyncHandler(async (req, res) => {
   });
 });
 
+// P06-06: confirm and mint act on ONE named credential (and revision), never "the oldest one".
+// A plain id only: an object like {"$ne": null} would act as a query operator.
+const findOwnCredential = async (wallet, { nftId, revision }) => {
+  if (!nftId || !mongoose.isValidObjectId(nftId)) {
+    throw new AppError("A valid nftId is required", 400);
+  }
+  const nft = await NFT.findOne({ _id: nftId, allocated: true, minted: false, ...walletFilter(wallet) });
+  if (!nft) throw new AppError("NFT allocation not found", 404);
+  if (Number(revision) !== nft.revision) {
+    throw new AppError("This credential was changed. Reload it and review the latest revision.", 409);
+  }
+  return nft;
+};
+
 export const confirmCredential = asyncHandler(async (req, res) => {
-  const { walletAddress, nftId } = req.body;
-  const wallet = await getStudentWallet(req.user, walletAddress);
-
-  const filter = {
-    allocated: true,
-    minted: false,
-    ...walletFilter(wallet),
-  };
-
-  if (nftId) {
-    // A plain id only: an object like {"$ne": null} would act as a query operator.
-    if (!mongoose.isValidObjectId(nftId)) {
-      throw new AppError("Invalid nftId", 400);
-    }
-    filter._id = nftId;
-  }
-
-  const nft = await NFT.findOne(filter).sort({ allocatedAt: 1 });
-
-  if (!nft) {
-    throw new AppError("NFT allocation not found", 404);
-  }
+  const wallet = await getStudentWallet(req.user, req.body.walletAddress);
+  const nft = await findOwnCredential(wallet, req.body);
 
   if (!nft.userId && wallet.userId) {
     nft.userId = wallet.userId;
@@ -349,35 +346,18 @@ export const pinMetadata = asyncHandler(async (req, res) => {
 });
 
 export const confirmMint = asyncHandler(async (req, res) => {
-  const { walletAddress, nft_Mint_Address, nftId } = req.body;
+  const { walletAddress, nft_Mint_Address } = req.body;
 
   if (!nft_Mint_Address || !isValidSolanaAddress(nft_Mint_Address)) {
     throw new AppError("A valid nft_Mint_Address is required", 400);
   }
 
   const wallet = await getStudentWallet(req.user, walletAddress);
+  const allocation = await findOwnCredential(wallet, req.body);
 
-  const filter = {
-    allocated: true,
-    minted: false,
-    ...walletFilter(wallet),
-  };
-
-  if (nftId) {
-    // A plain id only: an object like {"$ne": null} would act as a query operator.
-    if (!mongoose.isValidObjectId(nftId)) {
-      throw new AppError("Invalid nftId", 400);
-    }
-    filter._id = nftId;
-  }
-
-  const allocation = await NFT.findOne(filter).sort({ allocatedAt: 1 });
-
-  if (!allocation) {
-    throw new AppError(
-      "Wallet not authorized or NFT already minted/not allocated",
-      403
-    );
+  // Same rule the student screen shows: confirmed by the student, or the review window has passed.
+  if (!allocation.isConfirmed && allocation.confirmationDeadline > new Date()) {
+    throw new AppError("Confirm this credential before minting it", 403);
   }
 
   if (await NFT.exists({ nftAddress: nft_Mint_Address })) {

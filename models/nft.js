@@ -54,6 +54,11 @@ const NftSchema = new mongoose.Schema({
     ref: "Enrollment",
     index: true,
   },
+  // What the student confirmed. A later change to the credential bumps it (P06-03), so an old confirmation cannot apply.
+  revision: {
+    type: Number,
+    default: 1,
+  },
   credentialType: {
     type: String,
     default: "DEGREE",

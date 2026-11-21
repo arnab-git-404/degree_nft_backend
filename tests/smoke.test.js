@@ -498,7 +498,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const { victim, nft } = await setup();
       const response = await call("POST", "/confirm-nft-credential", {
         token: victim.token,
-        body: { walletAddress: victim.wallet.address, nftId: String(nft._id) },
+        body: { walletAddress: victim.wallet.address, nftId: String(nft._id), revision: 1 },
       });
       assert.equal(response.status, 200);
       assert.equal((await NFT.findById(nft._id)).isConfirmed, true);
@@ -1720,17 +1720,46 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
         body: allocation(student.wallet.address),
       });
 
-      const response = await call("POST", "/confirm-mint", {
-        token: student.token,
-        body: {
-          walletAddress: student.wallet.address,
-          nft_Mint_Address: Keypair.generate().publicKey.toBase58(),
-        },
-      });
-      assert.equal(response.status, 400);
-
       const row = await NFT.findOne({ institutionId: institution._id });
-      assert.equal(row.minted, false);
+      const body = {
+        walletAddress: student.wallet.address,
+        nft_Mint_Address: Keypair.generate().publicKey.toBase58(),
+        nftId: String(row._id),
+        revision: row.revision,
+      };
+      // Not confirmed yet and the review window is open: no minting.
+      assert.equal((await call("POST", "/confirm-mint", { token: student.token, body })).status, 403);
+      await NFT.updateOne({ _id: row._id }, { isConfirmed: true });
+      assert.equal((await call("POST", "/confirm-mint", { token: student.token, body })).status, 400);
+      assert.equal((await NFT.findById(row._id)).minted, false);
+    });
+
+    test("confirming one credential leaves the student's other credentials pending (P06-06)", async () => {
+      const student = await makeUser("student");
+      const owner = await makeUser("institution");
+      const institution = await makeInstitution(owner, "VERIFIED");
+      for (const [type, hash] of [["DEGREE", "QmD"], ["PROVISIONAL", "QmP"]]) {
+        const issued = await call("POST", "/create-nft-ipfsHash-allocation", {
+          token: owner.token,
+          institution,
+          body: { ...allocation(student.wallet.address), ipfsHash: hash, credentialType: type },
+        });
+        assert.equal(issued.status, 201, JSON.stringify(issued.body));
+      }
+      const [degree, provisional] = [await NFT.findOne({ ipfsHash: "QmD" }), await NFT.findOne({ ipfsHash: "QmP" })];
+      const confirm = (nft, extra = {}) =>
+        call("POST", "/confirm-nft-credential", {
+          token: student.token,
+          body: { walletAddress: student.wallet.address, nftId: String(nft._id), revision: nft.revision, ...extra },
+        });
+
+      // An id and revision are both required: no "confirm the oldest one".
+      assert.equal((await call("POST", "/confirm-nft-credential", { token: student.token, body: { walletAddress: student.wallet.address } })).status, 400);
+      assert.equal((await confirm(degree, { revision: 99 })).status, 409);
+      assert.equal((await confirm(degree)).status, 200);
+      assert.equal((await NFT.findById(degree._id)).isConfirmed, true);
+      assert.equal((await NFT.findById(provisional._id)).isConfirmed, false);
+      assert.equal((await NFT.findById(provisional._id)).nftStatus, "PENDING_CONFIRMATION");
     });
   });
 });
