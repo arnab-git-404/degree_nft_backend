@@ -1272,12 +1272,20 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
         [rahul.body.student.registrationNo, rahul.body.student.email, rahul.body.student.studentStatus, rahul.body.student.institutionId],
         ["BCET/2022/0142", "rahul@example.com", "ACTIVE", String(abc.institution._id)]
       );
-      assert.equal((await abc.as("POST", "/institution/students", { fullName: "Other", registrationNo: "BCET/2022/0142" })).status, 409);
-      assert.equal((await xyz.as("POST", "/institution/students", { fullName: "Same no. elsewhere", registrationNo: "BCET/2022/0142" })).status, 201);
-      // Optional fields may be left empty by many students without clashing.
-      assert.equal((await abc.as("POST", "/institution/students", { fullName: "No Reg A", registrationNo: "" })).status, 201);
-      assert.equal((await abc.as("POST", "/institution/students", { fullName: "No Reg B" })).status, 201);
-      for (const bad of [{}, { fullName: "x", email: "not-an-email" }, { fullName: "x", phone: "abc" }, { fullName: "x", studentStatus: "GONE" }]) {
+      assert.equal((await abc.as("POST", "/institution/students", { fullName: "Other", registrationNo: "BCET/2022/0142", email: "other@example.com" })).status, 409);
+      assert.equal((await xyz.as("POST", "/institution/students", { fullName: "Same no. elsewhere", registrationNo: "BCET/2022/0142", email: "same@example.com" })).status, 201);
+      // The registration number is optional: many students may leave it empty without clashing.
+      assert.equal((await abc.as("POST", "/institution/students", { fullName: "No Reg A", registrationNo: "", email: "a@example.com" })).status, 201);
+      assert.equal((await abc.as("POST", "/institution/students", { fullName: "No Reg B", email: "b@example.com" })).status, 201);
+      // The email is required (the wallet invite goes there), and a wallet hint must be a real address.
+      for (const bad of [
+        {},
+        { fullName: "x" },
+        { fullName: "x", email: "not-an-email" },
+        { fullName: "x", email: "x@example.com", phone: "abc" },
+        { fullName: "x", email: "x@example.com", studentStatus: "GONE" },
+        { fullName: "x", email: "x@example.com", walletHint: "not-a-wallet" },
+      ]) {
         assert.equal((await abc.as("POST", "/institution/students", bad)).status, 400, JSON.stringify(bad));
       }
 
@@ -1290,40 +1298,89 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const edited = await abc.as("PATCH", path, { phone: "", studentStatus: "INACTIVE" });
       assert.equal(edited.status, 200, JSON.stringify(edited.body));
       assert.equal(edited.body.student.phone, undefined);
+      assert.equal((await abc.as("PATCH", path, { email: "" })).status, 400); // the email can change but not be cleared
       const entry = await AuditLog.findOne({ action: "institution.student.create", targetId: rahul.body.student._id }).lean();
       assert.ok(entry && !JSON.stringify(entry.details).includes("example.com") && !JSON.stringify(entry.details).includes("98765"));
     });
 
+    test("the college invites a student, who proves a wallet to link their profile", async () => {
+      const abc = await tenant();
+      const hint = Keypair.generate().publicKey.toBase58();
+      const added = await abc.as("POST", "/institution/students", { fullName: "Claire", registrationNo: "C-1", email: `claire-${Date.now().toString(36)}@example.com`, walletHint: hint });
+      assert.equal(added.status, 201, JSON.stringify(added.body));
+      const student = added.body.student;
+      assert.equal(student.walletHint, hint);
+
+      const invite = await abc.as("POST", `/institution/students/${student._id}/invite`);
+      assert.equal(invite.status, 200, JSON.stringify(invite.body));
+      const token = invite.body.claimUrl.split("/").pop();
+      const row = (await abc.as("GET", "/institution/students")).body.students.find((s) => s._id === student._id);
+      assert.equal(row.claimStatus, "INVITED");
+      assert.equal(row.inviteTokenHash, undefined); // only the hash is stored, and never sent out
+
+      // The public page data, and a bad link.
+      const page = await call("GET", `/auth/student-invite/${token}`);
+      assert.equal(page.status, 200, JSON.stringify(page.body));
+      assert.deepEqual([page.body.invite.studentName, page.body.invite.walletHint], ["Claire", hint]);
+      assert.equal((await call("GET", "/auth/student-invite/not-a-real-token")).status, 400);
+
+      // A forged signature fails; the wallet's real key links the profile and signs the student in.
+      const keypair = Keypair.generate();
+      const walletAddress = keypair.publicKey.toBase58();
+      const nonce = await call("POST", "/auth/nonce", { body: { walletAddress } });
+      const forged = await call("POST", `/auth/student-invite/${token}/claim`, { body: { walletAddress, signature: Buffer.alloc(64).toString("base64") } });
+      assert.equal(forged.status, 401);
+      const signature = Buffer.from(nacl.sign.detached(new TextEncoder().encode(nonce.body.message), keypair.secretKey)).toString("base64");
+      const claimed = await call("POST", `/auth/student-invite/${token}/claim`, { body: { walletAddress, signature } });
+      assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+      assert.ok(claimed.body.token);
+      created.users.push(claimed.body.user._id);
+      const wallet = await Wallet.findOne({ address: walletAddress });
+      created.wallets.push(wallet._id);
+      assert.equal(wallet.isVerified, true);
+
+      // Linked, showing the wallet they proved (which differs from the college's hint here).
+      const linked = (await abc.as("GET", "/institution/students")).body.students.find((s) => s._id === student._id);
+      assert.deepEqual([linked.claimStatus, linked.wallet, linked.walletMismatch], ["LINKED", walletAddress, true]);
+      assert.ok(await AuditLog.exists({ action: "student.claim", institutionId: abc.institution._id }));
+
+      // The link works once, and a linked student cannot be invited again.
+      assert.equal((await call("GET", `/auth/student-invite/${token}`)).status, 400);
+      assert.equal((await abc.as("POST", `/institution/students/${student._id}/invite`)).status, 409);
+    });
+
     test("bulk import saves good rows and reports the rest by row number", async () => {
       const abc = await tenant();
-      await abc.as("POST", "/institution/students", { fullName: "Already here", registrationNo: "R-1" });
+      await abc.as("POST", "/institution/students", { fullName: "Already here", registrationNo: "R-1", email: "here@example.com" });
       const result = await abc.as("POST", "/institution/students/import", {
         students: [
           { row: 2, fullName: "Asha", registrationNo: "r-2", email: "asha@example.com" },
-          { row: 3, fullName: "Bina", registrationNo: "R-1" }, // used in the college
-          { row: 4, fullName: "", registrationNo: "R-3" }, // no name
-          { row: 5, fullName: "Chetan", registrationNo: "R-2" }, // repeats row 2 (case-insensitive)
+          { row: 3, fullName: "Bina", registrationNo: "R-1", email: "bina@example.com" }, // used in the college
+          { row: 4, fullName: "", registrationNo: "R-3", email: "x@example.com" }, // no name
+          { row: 5, fullName: "Chetan", registrationNo: "R-2", email: "chetan@example.com" }, // repeats row 2 (case-insensitive)
           { row: 6, fullName: "Divya", email: "bad" },
-          { row: 7, fullName: "Esha", studentStatus: "INACTIVE", institutionId: "000000000000000000000000" },
+          { row: 7, fullName: "Esha", email: "esha@example.com", studentStatus: "INACTIVE", institutionId: "000000000000000000000000" },
+          { row: 8, fullName: "Farah" }, // no email
         ],
       });
       assert.equal(result.status, 200, JSON.stringify(result.body));
       assert.equal(result.body.created, 2);
-      assert.deepEqual(result.body.failed.map((f) => f.row), [3, 4, 5, 6]);
+      assert.deepEqual(result.body.failed.map((f) => f.row), [3, 4, 5, 6, 8]);
       assert.match(result.body.failed.find((f) => f.row === 5).message, /also on row 2/);
       const saved = await Student.find({ institutionId: abc.institution._id }).sort({ fullName: 1 }).lean();
       assert.deepEqual(saved.map((s) => s.fullName), ["Already here", "Asha", "Esha"]);
       assert.ok(await AuditLog.exists({ action: "institution.student.import", institutionId: abc.institution._id, "details.created": 2 }));
 
       assert.equal((await abc.as("POST", "/institution/students/import", { students: [] })).status, 400);
-      assert.equal((await abc.as("POST", "/institution/students/import", { students: Array.from({ length: 501 }, () => ({ fullName: "x" })) })).status, 400);
+      assert.equal((await abc.as("POST", "/institution/students/import", { students: Array.from({ length: 501 }, () => ({ fullName: "x", email: "x@example.com" })) })).status, 400);
     });
 
     test("profiles stay inside the college; staff can only read", async () => {
       const abc = await tenant();
       const xyz = await tenant();
-      const student = (await abc.as("POST", "/institution/students", { fullName: "Rahul Sharma" })).body.student;
+      const student = (await abc.as("POST", "/institution/students", { fullName: "Rahul Sharma", email: "rahul@example.com" })).body.student;
       assert.equal((await xyz.as("PATCH", `/institution/students/${student._id}`, { fullName: "Hijacked" })).status, 404);
+      assert.equal((await xyz.as("POST", `/institution/students/${student._id}/invite`)).status, 404);
       assert.equal((await xyz.as("GET", "/institution/students")).body.students.length, 0);
 
       const add = async (roleName) => {
@@ -1333,10 +1390,11 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       };
       const staff = await add("staff");
       assert.equal((await staff("GET", "/institution/students")).body.students.length, 1);
-      assert.equal((await staff("POST", "/institution/students", { fullName: "x" })).status, 403);
+      assert.equal((await staff("POST", "/institution/students", { fullName: "x", email: "x@example.com" })).status, 403);
       assert.equal((await staff("PATCH", `/institution/students/${student._id}`, { fullName: "x" })).status, 403);
+      assert.equal((await staff("POST", `/institution/students/${student._id}/invite`)).status, 403);
       const registrar = await add("registrar");
-      assert.equal((await registrar("POST", "/institution/students", { fullName: "Added by registrar" })).status, 201);
+      assert.equal((await registrar("POST", "/institution/students", { fullName: "Added by registrar", email: "reg@example.com" })).status, 201);
       assert.equal((await Student.findById(student._id)).fullName, "Rahul Sharma");
     });
   });
@@ -1354,7 +1412,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const mba = await program("MBA");
       const cse22 = await batch(cse._id, 2022, 2026);
       const mba27 = await batch(mba._id, 2027, 2029);
-      const rahul = (await as("POST", "/institution/students", { fullName: "Rahul Sharma", registrationNo: "R-1" })).body.student;
+      const rahul = (await as("POST", "/institution/students", { fullName: "Rahul Sharma", registrationNo: "R-1", email: "rahul@example.com" })).body.student;
       return { head, institution, as, cse, mba, cse22, mba27, rahul };
     };
 
@@ -1374,7 +1432,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal(await Student.countDocuments({ institutionId: abc.institution._id }), 1);
 
       assert.equal((await abc.as("POST", "/institution/enrollments", { studentId: abc.rahul._id, programSessionId: abc.cse22._id })).status, 409);
-      const priya = (await abc.as("POST", "/institution/students", { fullName: "Priya" })).body.student;
+      const priya = (await abc.as("POST", "/institution/students", { fullName: "Priya", email: "priya@example.com" })).body.student;
       const clash = await abc.as("POST", "/institution/enrollments", { studentId: priya._id, programSessionId: abc.cse22._id, enrollmentCode: "ABC-MBA-2027-0001" });
       assert.equal(clash.status, 409);
       assert.match(clash.body.message, /enrollment code/);
@@ -1416,7 +1474,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     test("Excel import finds students by registration no. and batches by program code + start year", async () => {
       const abc = await tenant();
       const as = abc.as;
-      await as("POST", "/institution/students", { fullName: "Asha", registrationNo: "R-2" });
+      await as("POST", "/institution/students", { fullName: "Asha", registrationNo: "R-2", email: "asha@example.com" });
       // A second CSE batch starting in 2022 (lateral entry) makes "CSE 2022" ambiguous without an end year.
       await as("POST", "/institution/program-sessions", { programId: abc.cse._id, startYear: 2022, endYear: 2025 });
       const result = await as("POST", "/institution/enrollments/import", {

@@ -34,13 +34,26 @@ const StudentSchema = new mongoose.Schema(
       uppercase: true,
       maxlength: [40, "Registration no. is too long (40 characters at most)"],
     },
+    // Required when a student is added (the wallet invite goes here). Older students may have none.
     email: {
       type: String,
       set: optional,
       lowercase: true,
+      required: [function requiredWhenNew() { return this.isNew; }, "Email is required"],
       maxlength: [200, "Email is too long"],
       match: [/^\S+@\S+\.\S+$/, "Enter a valid email address"],
     },
+    // The wallet the college expects (optional, unverified). The student's own signed wallet is what counts.
+    walletHint: {
+      type: String,
+      set: optional,
+      match: [/^[1-9A-HJ-NP-Za-km-z]{32,44}$/, "Enter a valid Solana wallet address"],
+    },
+    // Wallet invite: only the hash of the emailed link is kept. Linked (userId set) once the student signs with a wallet.
+    inviteTokenHash: { type: String, select: false, index: true, sparse: true },
+    invitedAt: { type: Date },
+    inviteExpiresAt: { type: Date },
+    claimedAt: { type: Date },
     phone: {
       type: String,
       set: optional,

@@ -147,6 +147,7 @@ router.get("/institution/students", protect, requireInstitution("student:read"),
 router.post("/institution/students", protect, requireInstitution("student:create"), studentController.createStudent);
 router.post("/institution/students/import", protect, requireInstitution("student:create"), studentController.importStudents);
 router.patch("/institution/students/:studentId", protect, requireInstitution("student:update"), studentController.updateStudent);
+router.post("/institution/students/:studentId/invite", protect, requireInstitution("student:update"), studentController.inviteStudent);
 
 // Enrollments: a student in a batch (P05-04/05)
 router.get("/institution/enrollments", protect, requireInstitution("enrollment:read"), enrollmentController.listEnrollments);

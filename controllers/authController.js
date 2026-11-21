@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import User, { SUPER_ADMIN_ACCOUNT } from "../models/user.js";
 import InstitutionMembership from "../models/institutionMembership.js";
 import Wallet from "../models/wallet.js";
+import Student from "../models/student.js";
 import AuthNonce from "../models/authNonce.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
@@ -213,6 +214,107 @@ export const walletLogin = asyncHandler(auditFailures("auth.login.wallet", "ACCO
   }
 
   await audit(req, { action: "auth.login.wallet", scope: "ACCOUNT", actor: user, targetType: "Wallet", targetId: wallet._id, summary: `Signed in with wallet ${walletAddress}` });
+
+  res.status(200).json({
+    success: true,
+    token: signToken(user),
+    user: user.toJSON(),
+  });
+}));
+
+// The student behind an emailed wallet-invite link, or a plain 400 when it is wrong, used or expired.
+const findStudentInvite = async (token) => {
+  const student = await Student.findOne({
+    inviteTokenHash: hashActivationToken(token),
+    inviteExpiresAt: { $gt: new Date() },
+    userId: null,
+  })
+    .select("+inviteTokenHash")
+    .populate("institutionId", "name code status");
+
+  if (!student || student.institutionId?.status !== "ACTIVE" || student.studentStatus !== "ACTIVE") {
+    throw new AppError("This invite link is invalid or has expired. Ask your college to send a new one.", 400, "INVALID_INVITE");
+  }
+
+  return student;
+};
+
+// Public: what the claim page shows before the student connects a wallet.
+export const getStudentInvite = asyncHandler(async (req, res) => {
+  const student = await findStudentInvite(req.params.token);
+
+  res.status(200).json({
+    success: true,
+    invite: {
+      studentName: student.fullName,
+      registrationNo: student.registrationNo || null,
+      collegeName: student.institutionId.name,
+      walletHint: student.walletHint || null,
+      expiresAt: student.inviteExpiresAt,
+    },
+  });
+});
+
+/**
+ * Public: the student signs the challenge with their wallet. That proves they hold it, so the wallet is
+ * saved (verified) on their account and the college's profile is linked to that account. Signs them in.
+ * The link is single-use; the wallet the college guessed (walletHint) is never trusted, only the signed one.
+ */
+export const claimStudentInvite = asyncHandler(auditFailures("student.claim", "ACCOUNT", (req) => ({ details: { walletAddress: req.body?.walletAddress } }))(async (req, res) => {
+  const { walletAddress, signature, signatureEncoding = "base64" } = req.body;
+
+  if (!walletAddress || !signature) {
+    throw new AppError("walletAddress and signature are required", 400);
+  }
+
+  if (!isValidSolanaAddress(walletAddress)) {
+    throw new AppError("Invalid Solana wallet address", 400);
+  }
+
+  const student = await findStudentInvite(req.params.token);
+  await consumeNonce({ walletAddress, signature, signatureEncoding });
+
+  const { user, wallet } = await findOrCreateUserByWallet(walletAddress, { name: student.fullName, verified: true });
+
+  if (!user.isActive) {
+    throw new AppError("User account is inactive", 403);
+  }
+
+  // The link went to the student's email, so that address counts as verified unless another account already uses it.
+  if (!user.email && !(await User.exists({ email: student.email, _id: { $ne: user._id } }))) {
+    user.email = student.email;
+    user.emailVerified = true;
+  }
+
+  // Atomic: two people racing on one link cannot both win.
+  const claimed = await Student.findOneAndUpdate(
+    { _id: student._id, userId: null, inviteTokenHash: student.inviteTokenHash },
+    { $set: { userId: user._id, claimedAt: new Date() }, $unset: { inviteTokenHash: "", inviteExpiresAt: "" } }
+  );
+
+  if (!claimed) {
+    throw new AppError("This invite has already been used.", 409, "INVALID_INVITE");
+  }
+
+  await backfillWalletReferences(user._id, wallet);
+  user.lastLoginAt = new Date();
+  await user.save();
+  await populateUser(user);
+
+  if (!user.roleId?.isActive) {
+    throw new AppError("Your access has been revoked: your role is inactive", 403, "ACCESS_REVOKED");
+  }
+
+  await audit(req, {
+    action: "student.claim",
+    scope: "INSTITUTION",
+    actor: user,
+    institutionId: student.institutionId._id,
+    targetType: "Student",
+    targetId: student._id,
+    summary: `${student.fullName} linked wallet ${walletAddress}`,
+    details: { walletAddress, matchedHint: !student.walletHint || student.walletHint === walletAddress },
+  });
 
   res.status(200).json({
     success: true,
