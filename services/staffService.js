@@ -7,6 +7,7 @@ import { buildActivationUrl, createActivationToken } from "../utils/activationTo
 import { sendActivationEmail } from "./emailService.js";
 import { audit } from "../utils/audit.js";
 import AppError from "../utils/AppError.js";
+import { colorFromSeed, hashString, HEX_COLOR } from "../utils/color.js";
 
 // A role holding any of these is an admin role: only the Super Admin may grant, change or remove it.
 const ADMIN_PERMISSIONS = ["*", "staff:invite", "staff:manage", "role:manage"];
@@ -53,7 +54,17 @@ export const listMembers = async (institution, { asSuperAdmin }) => {
     assignableRoles(institution, { asSuperAdmin }),
   ]);
 
-  return { members, roles, primaryAdminMembershipId: institution.primaryAdminMembershipId || null };
+  // Rows saved before `color` existed get the same generated colour the model would assign.
+  const withColor = members.map((member) => ({
+    ...member.toObject(),
+    color: member.color ?? colorFromSeed(hashString(member.userId?.email || "")),
+  }));
+
+  return { members: withColor, roles, primaryAdminMembershipId: institution.primaryAdminMembershipId || null };
+};
+
+const checkColor = (color) => {
+  if (color !== undefined && !HEX_COLOR.test(String(color))) throw new AppError("color must look like #rrggbb", 400);
 };
 
 /**
@@ -66,6 +77,7 @@ export const inviteMember = async (req, institution, body, { asSuperAdmin }) => 
 
   if (!EMAIL_PATTERN.test(email) || email.length > 200) throw new AppError("Provide a valid email address", 400);
   if (name.length > 120) throw new AppError("name must be 120 characters or fewer", 400);
+  checkColor(body?.color);
 
   const role = await findAssignableRole(institution, body?.roleId, { asSuperAdmin });
   let user = await User.findOne({ email });
@@ -114,6 +126,7 @@ export const inviteMember = async (req, institution, body, { asSuperAdmin }) => 
             userId: user._id,
             institutionId: institution._id,
             roleId: role._id,
+            color: body?.color || colorFromSeed(hashString(email)),
             status: "INVITED",
             invitedBy: req.user._id,
             invitedAt: new Date(),
@@ -165,9 +178,10 @@ export const inviteMember = async (req, institution, body, { asSuperAdmin }) => 
  */
 export const updateMember = async (req, institution, membershipId, body, { asSuperAdmin }) => {
   assertId(membershipId, "membershipId");
-  const { roleId, status } = body || {};
+  const { roleId, status, color } = body || {};
 
-  if (roleId === undefined && status === undefined) throw new AppError("Provide roleId or status", 400);
+  if (roleId === undefined && status === undefined && color === undefined) throw new AppError("Provide roleId, status or color", 400);
+  checkColor(color);
 
   // Scoped to the selected college: another college's membership id is simply not found.
   const membership = await InstitutionMembership.findOne({ _id: membershipId, institutionId: institution._id }).populate("roleId");
@@ -186,6 +200,8 @@ export const updateMember = async (req, institution, membershipId, body, { asSup
     if (isHead && !isAdminRole(role)) throw new AppError("Transfer the head to someone else before changing this role", 409);
     membership.roleId = role._id;
   }
+
+  if (color !== undefined) membership.color = color;
 
   if (status !== undefined) {
     if (!["ACTIVE", "SUSPENDED"].includes(status)) throw new AppError("status must be ACTIVE or SUSPENDED", 400);

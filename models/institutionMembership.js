@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { colorFromSeed, hashString, HEX_COLOR } from "../utils/color.js";
 
 export const MEMBERSHIP_STATUSES = ["INVITED", "ACTIVE", "SUSPENDED"];
 
@@ -35,21 +36,43 @@ const InstitutionMembershipSchema = new mongoose.Schema(
     },
     invitedAt: Date,
     acceptedAt: Date,
+    // Hex colour for the person's avatar tile: set from the user id unless a colour is picked.
+    color: { type: String, match: HEX_COLOR },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-InstitutionMembershipSchema.index({ userId: 1, institutionId: 1 }, { unique: true });
+InstitutionMembershipSchema.pre("validate", function setColor() {
+  if (!this.color && this.userId)
+    this.color = colorFromSeed(hashString(String(this.userId)));
+});
+
+InstitutionMembershipSchema.index(
+  { userId: 1, institutionId: 1 },
+  { unique: true },
+);
 
 // The role must be a college-level role, never a platform role, and a college's own role only in that college.
 InstitutionMembershipSchema.pre("validate", async function checkRoleScope() {
   if (!this.isModified("roleId")) return;
-  const role = await mongoose.model("Role").findById(this.roleId).select("scope institutionId");
+  const role = await mongoose
+    .model("Role")
+    .findById(this.roleId)
+    .select("scope institutionId");
   if (role?.scope !== "INSTITUTION") {
-    this.invalidate("roleId", "Membership role must be an INSTITUTION-scoped role");
-  } else if (role.institutionId && !role.institutionId.equals(this.institutionId)) {
+    this.invalidate(
+      "roleId",
+      "Membership role must be an INSTITUTION-scoped role",
+    );
+  } else if (
+    role.institutionId &&
+    !role.institutionId.equals(this.institutionId)
+  ) {
     this.invalidate("roleId", "This role belongs to another college");
   }
 });
 
-export default mongoose.model("InstitutionMembership", InstitutionMembershipSchema);
+export default mongoose.model(
+  "InstitutionMembership",
+  InstitutionMembershipSchema,
+);
