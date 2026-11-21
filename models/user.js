@@ -117,7 +117,7 @@ UserSchema.virtual("memberships", {
 UserSchema.virtual("studentProfiles", {
   ref: "StudentDetails",
   localField: "_id",
-  foreignField: "studentId",
+  foreignField: "userId",
 });
 
 export default mongoose.model("User", UserSchema);

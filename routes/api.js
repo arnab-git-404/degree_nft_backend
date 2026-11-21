@@ -6,6 +6,7 @@ import * as programController from "../controllers/programController.js";
 import * as collegeRoleController from "../controllers/collegeRoleController.js";
 import * as studentController from "../controllers/studentController.js";
 import * as enrollmentController from "../controllers/enrollmentController.js";
+import * as credentialTypeController from "../controllers/credentialTypeController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
 import { protect, requirePermission, requireInstitution } from "../middleware/auth.js";
@@ -88,6 +89,11 @@ router.patch(
   requireInstitution("staff:manage"),
   institutionController.updateStaff
 );
+
+// Credential types: the college's master list of what it issues
+router.get("/institution/credential-types", protect, requireInstitution("credentialType:read"), credentialTypeController.listCredentialTypes);
+router.post("/institution/credential-types", protect, requireInstitution("credentialType:create"), credentialTypeController.createCredentialType);
+router.patch("/institution/credential-types/:credentialTypeId", protect, requireInstitution("credentialType:update"), credentialTypeController.updateCredentialType);
 
 // Academic catalog (P05)
 router.get("/institution/programs", protect, requireInstitution("program:read"), programController.listPrograms);

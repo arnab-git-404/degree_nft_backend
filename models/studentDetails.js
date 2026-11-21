@@ -11,7 +11,7 @@ const StudentDetailsSchema = new mongoose.Schema({
     required: true,
     trim: true,
   },
-  studentId: {
+  userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     index: true,

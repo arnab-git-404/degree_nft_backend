@@ -21,6 +21,7 @@ import InstitutionApplication from "../models/institutionApplication.js";
 import RegistrationLink from "../models/registrationLink.js";
 import { audit } from "../utils/audit.js";
 import NFT from "../models/nft.js";
+import CredentialType from "../models/credentialType.js";
 import PlatformSetting from "../models/platformSetting.js";
 import { decryptSecret } from "../utils/secretBox.js";
 import { sendMail } from "../services/emailService.js";
@@ -107,6 +108,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     await AcademicSession.deleteMany({ institutionId: { $in: created.unis } });
     await Student.deleteMany({ institutionId: { $in: created.unis } });
     await Enrollment.deleteMany({ institutionId: { $in: created.unis } });
+    await CredentialType.deleteMany({ institutionId: { $in: created.unis } });
     await Institution.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
@@ -1496,6 +1498,45 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       // Importing the same rows again: already enrolled.
       const again = await as("POST", "/institution/enrollments/import", { enrollments: [{ row: 2, registrationNo: "R-1", programCode: "MBA", startYear: 2027 }] });
       assert.deepEqual([again.body.created, again.body.failed[0]?.message], [0, "This student is already enrolled in that batch"]);
+    });
+  });
+
+  describe("credential types (P06-02)", () => {
+    test("each college keeps its own master list; only an Active type can be issued; one enrollment holds several credentials", async () => {
+      const head = await makeUser("institution");
+      const abc = await makeInstitution(head, "VERIFIED");
+      const otherHead = await makeUser("institution");
+      const xyz = await makeInstitution(otherHead, "VERIFIED");
+      const as = (method, path, body) => call(method, path, { token: head.token, institution: abc, body });
+
+      // A new college starts with the usual types, then the list is its own.
+      const list = await as("GET", "/institution/credential-types");
+      assert.equal(list.status, 200, JSON.stringify(list.body));
+      assert.ok(list.body.credentialTypes.some((type) => type.code === "DEGREE"));
+
+      const created = await as("POST", "/institution/credential-types", { code: "bonafide", name: "Bonafide letter" });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      assert.equal(created.body.credentialType.code, "BONAFIDE");
+      assert.match(created.body.credentialType.color, /^#[0-9a-f]{6}$/i);
+      assert.equal((await as("POST", "/institution/credential-types", { code: "BONAFIDE", name: "Again" })).status, 409);
+      assert.equal((await as("PATCH", `/institution/credential-types/${created.body.credentialType._id}`, { code: "X" })).status, 400);
+      // The same code in another college is fine, and lists never cross.
+      assert.equal((await call("POST", "/institution/credential-types", { token: otherHead.token, institution: xyz, body: { code: "BONAFIDE", name: "XYZ bonafide" } })).status, 201);
+      assert.equal((await as("GET", "/institution/credential-types")).body.credentialTypes.filter((type) => type.code === "BONAFIDE").length, 1);
+
+      // Issue two credential types for one enrollment: allowed. Inactive or unknown types: refused.
+      const program = (await as("POST", "/institution/programs", { code: "CSE", name: "CSE" })).body.program;
+      const batch = (await as("POST", "/institution/program-sessions", { programId: program._id, startYear: 2022, endYear: 2026 })).body.session;
+      const rahul = (await as("POST", "/institution/students", { fullName: "Rahul", email: "rahul@example.com" })).body.student;
+      const enrollment = (await as("POST", "/institution/enrollments", { studentId: rahul._id, programSessionId: batch._id })).body.enrollment;
+      const student = await makeUser("student");
+      const issue = (credentialType, ipfsHash) => as("POST", "/create-nft-ipfsHash-allocation", { ...allocation(student.wallet.address), ipfsHash, enrollmentId: enrollment._id, credentialType });
+      assert.equal((await issue("DEGREE", "QmDeg")).status, 201);
+      assert.equal((await issue("provisional", "QmProv")).status, 201);
+      assert.equal(await NFT.countDocuments({ enrollmentId: enrollment._id }), 2);
+      assert.equal((await issue("NOPE", "QmNope")).status, 400);
+      await as("PATCH", `/institution/credential-types/${created.body.credentialType._id}`, { status: "INACTIVE" });
+      assert.equal((await issue("BONAFIDE", "QmBon")).status, 400);
     });
   });
 

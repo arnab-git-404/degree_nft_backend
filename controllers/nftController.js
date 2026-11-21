@@ -1,6 +1,8 @@
 import { audit } from "../utils/audit.js";
 import mongoose from "mongoose";
 import NFT from "../models/nft.js";
+import CredentialType, { ensureCredentialTypes } from "../models/credentialType.js";
+import Enrollment from "../models/enrollment.js";
 import Reports from "../models/reports.js";
 import Institution from "../models/institution.js";
 import Wallet from "../models/wallet.js";
@@ -118,6 +120,26 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     );
   }
 
+  // P06-02: an enrollment may be named (P06-04 makes the UI send it, then it becomes required).
+  // The enrollment is looked up inside the caller's own college, so a foreign id is just "not found".
+  // The type must be an Active entry of the college's own master list (Credential types page).
+  await ensureCredentialTypes(institution._id);
+  const credentialType = String(req.body.credentialType || "DEGREE").toUpperCase();
+  if (!(await CredentialType.exists({ institutionId: institution._id, code: credentialType, status: "ACTIVE" }))) {
+    throw new AppError(`"${credentialType}" is not an active credential type of this college`, 400);
+  }
+  let enrollment = null;
+  if (req.body.enrollmentId) {
+    if (!mongoose.isValidObjectId(req.body.enrollmentId)) {
+      throw new AppError("Invalid enrollmentId", 400);
+    }
+    enrollment = await Enrollment.findOne({ _id: req.body.enrollmentId, institutionId: institution._id });
+    if (!enrollment) throw new AppError("Enrollment not found at this institution", 404);
+    if (enrollment.status === "CANCELLED") {
+      throw new AppError("Cannot issue a credential for a cancelled enrollment", 409);
+    }
+  }
+
   const existingAllocation = await NFT.findOne({
     ipfsHash,
     studentWallet,
@@ -155,7 +177,10 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     institutionWallet: institution.walletAddress,
     studentWallet,
     institutionId: institution._id,
-    studentId: student._id,
+    userId: student._id,
+    credentialType,
+    enrollmentId: enrollment?._id,
+    studentId: enrollment?.studentId,
     institutionWalletId: institutionWallet?._id,
     studentWalletId: studentWalletDocument._id,
     sellerFeeBasisPoints,
@@ -165,12 +190,12 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
   });
 
   await StudentDetails.findOneAndUpdate(
-    { institutionId: institution._id, studentId: student._id },
+    { institutionId: institution._id, userId: student._id },
     {
       $setOnInsert: {
         studentName: student.name,
         studentWalletAddress: studentWallet,
-        studentId: student._id,
+        userId: student._id,
         institutionId: institution._id,
         studentWalletId: studentWalletDocument._id,
         institutionWalletId: institutionWallet?._id,
@@ -270,8 +295,8 @@ export const confirmCredential = asyncHandler(async (req, res) => {
     throw new AppError("NFT allocation not found", 404);
   }
 
-  if (!nft.studentId && wallet.userId) {
-    nft.studentId = wallet.userId;
+  if (!nft.userId && wallet.userId) {
+    nft.userId = wallet.userId;
   }
 
   if (!nft.studentWalletId && wallet._id) {
@@ -370,8 +395,8 @@ export const confirmMint = asyncHandler(async (req, res) => {
     throw new AppError(`Mint could not be verified: ${error.message}`, 400);
   }
 
-  if (!allocation.studentId && wallet.userId) {
-    allocation.studentId = wallet.userId;
+  if (!allocation.userId && wallet.userId) {
+    allocation.userId = wallet.userId;
   }
 
   if (!allocation.studentWalletId && wallet._id) {
@@ -403,11 +428,11 @@ export const confirmMint = asyncHandler(async (req, res) => {
     );
   }
 
-  if (allocation.institutionId && allocation.studentId) {
+  if (allocation.institutionId && allocation.userId) {
     await StudentDetails.updateOne(
       {
         institutionId: allocation.institutionId,
-        studentId: allocation.studentId,
+        userId: allocation.userId,
       },
       { $inc: { studentTotalMintedNFT: 1 } }
     );
@@ -494,7 +519,7 @@ export const createReport = asyncHandler(async (req, res) => {
     institutionWallet: nft.institutionWallet,
     studentWallet: wallet.address,
     institutionId: institutionId || undefined,
-    studentId: nft.studentId || wallet.userId || req.user._id,
+    userId: nft.userId || wallet.userId || req.user._id,
     institutionWalletId: institutionWalletId || undefined,
     studentWalletId: nft.studentWalletId || wallet._id || undefined,
     nftIpfsHash,

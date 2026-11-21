@@ -74,6 +74,21 @@ export const PERMISSION_GROUPS = [
         label: "Update batches",
         description: "Change a batch's end year or status, or remove a batch by unticking its intake.",
       },
+      {
+        key: "credentialType:read",
+        label: "View credential types",
+        description: "See the kinds of credential the college issues (Degree, Marksheet...), and pick one when issuing.",
+      },
+      {
+        key: "credentialType:create",
+        label: "Create credential types",
+        description: "Add a credential type with a code unique in the college.",
+      },
+      {
+        key: "credentialType:update",
+        label: "Update credential types",
+        description: "Rename, edit details, or deactivate a credential type (the code stays fixed).",
+      },
     ],
   },
   {

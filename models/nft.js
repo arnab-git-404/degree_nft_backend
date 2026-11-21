@@ -37,10 +37,26 @@ const NftSchema = new mongoose.Schema({
     ref: "Institution",
     index: true,
   },
-  studentId: {
+  userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     index: true,
+  },
+  // P06: the college student profile + enrollment this credential belongs to.
+  // Optional only for legacy rows; deliberately NOT unique, one enrollment holds many credentials.
+  studentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Student",
+    index: true,
+  },
+  enrollmentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Enrollment",
+    index: true,
+  },
+  credentialType: {
+    type: String,
+    default: "DEGREE",
   },
   institutionWalletId: {
     type: mongoose.Schema.Types.ObjectId,

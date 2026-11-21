@@ -14,7 +14,7 @@ const ReportSchema = new mongoose.Schema({
     ref: "Institution",
     index: true,
   },
-  studentId: {
+  userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     index: true,

@@ -63,11 +63,11 @@ export const backfillWalletReferences = async (userId, wallet) => {
     NFT.updateMany(
       {
         studentWallet: address,
-        $or: [{ studentId: { $exists: false } }, { studentId: null }],
+        $or: [{ userId: { $exists: false } }, { userId: null }],
       },
       {
         $set: {
-          studentId: userId,
+          userId: userId,
           studentWalletId: wallet._id,
         },
       }
@@ -75,11 +75,11 @@ export const backfillWalletReferences = async (userId, wallet) => {
     Reports.updateMany(
       {
         studentWallet: address,
-        $or: [{ studentId: { $exists: false } }, { studentId: null }],
+        $or: [{ userId: { $exists: false } }, { userId: null }],
       },
       {
         $set: {
-          studentId: userId,
+          userId: userId,
           studentWalletId: wallet._id,
         },
       }
@@ -88,7 +88,7 @@ export const backfillWalletReferences = async (userId, wallet) => {
       { studentWalletAddress: address },
       {
         $set: {
-          studentId: userId,
+          userId: userId,
           studentWalletId: wallet._id,
         },
       }

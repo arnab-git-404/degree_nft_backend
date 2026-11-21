@@ -36,7 +36,7 @@ const saveUnique = async (operation) => {
 };
 
 const POPULATE = [
-  { path: "studentId", select: "fullName registrationNo studentStatus" },
+  { path: "studentId", select: "fullName registrationNo studentStatus walletHint" },
   { path: "programSessionId", select: "startYear endYear status name code color" },
   { path: "programId", select: "code name color" },
 ];

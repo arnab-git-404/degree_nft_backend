@@ -598,7 +598,7 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
   const [allocations, total] = await Promise.all([
     NFT.find(filter)
       .populate("institutionId", "name code")
-      .populate("studentId", "name email")
+      .populate("userId", "name email")
       .sort({ allocatedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -673,7 +673,7 @@ export const getReports = asyncHandler(async (req, res) => {
   const [reports, total] = await Promise.all([
     Reports.find(filter)
       .populate("institutionId", "name code")
-      .populate("studentId", "name email")
+      .populate("userId", "name email")
       .sort({ reportedOn: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -707,7 +707,7 @@ export const resolveReport = asyncHandler(async (req, res) => {
   await audit(req, { action: "admin.report.resolve", institutionId: report.institutionId, targetType: "Report", targetId: report._id, summary: `Resolved report: ${report.reportType}` });
   await report.populate([
     { path: "institutionId", select: "name code" },
-    { path: "studentId", select: "name email" },
+    { path: "userId", select: "name email" },
   ]);
 
   res.status(200).json({ success: true, report });
