@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 
 const ReportSchema = new mongoose.Schema({
-  universityWallet: {
+  institutionWallet: {
     type: String,
     required: true,
   },
@@ -9,9 +9,9 @@ const ReportSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  universityId: {
+  institutionId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "University",
+    ref: "Institution",
     index: true,
   },
   studentId: {
@@ -19,7 +19,7 @@ const ReportSchema = new mongoose.Schema({
     ref: "User",
     index: true,
   },
-  universityWalletId: {
+  institutionWalletId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Wallet",
     index: true,

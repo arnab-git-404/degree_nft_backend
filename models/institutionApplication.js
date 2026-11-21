@@ -1,0 +1,56 @@
+import mongoose from "mongoose";
+
+// An application exists before any account or wallet, so it is kept apart from Institution.
+const InstitutionApplicationSchema = new mongoose.Schema(
+  {
+    linkId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "RegistrationLink",
+      required: true,
+      index: true,
+    },
+    name: { type: String, required: true, trim: true },
+    code: {
+      type: String,
+      required: true,
+      trim: true,
+      uppercase: true,
+      index: true,
+    },
+    email: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+    contactName: { type: String, required: true, trim: true },
+    walletAddress: { type: String, required: true, trim: true, index: true },
+    phone: { type: String, trim: true, default: "" },
+    website: { type: String, trim: true, default: "" },
+    accreditation: { type: String, trim: true, default: "" },
+    address: {
+      city: { type: String, trim: true, default: "" },
+      state: { type: String, trim: true, default: "" },
+      country: { type: String, trim: true, default: "" },
+    },
+    status: {
+      type: String,
+      enum: ["PENDING", "APPROVED", "REJECTED"],
+      default: "PENDING",
+      index: true,
+    },
+    // Set by the Super Admin review (approve or reject).
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    reviewedAt: Date,
+    reviewNote: { type: String, trim: true, default: "", maxlength: 1000 },
+    // The college created on approval (also the idempotency answer for a repeated approve).
+    institutionId: { type: mongoose.Schema.Types.ObjectId, ref: "Institution" },
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model(
+  "InstitutionApplication",
+  InstitutionApplicationSchema,
+);

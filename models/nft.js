@@ -22,7 +22,7 @@ const NftSchema = new mongoose.Schema({
     trim: true,
     index: true,
   },
-  universityWallet: {
+  institutionWallet: {
     type: String,
     required: true,
     trim: true,
@@ -32,9 +32,9 @@ const NftSchema = new mongoose.Schema({
     required: true,
     trim: true,
   },
-  universityId: {
+  institutionId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "University",
+    ref: "Institution",
     index: true,
   },
   studentId: {
@@ -42,7 +42,7 @@ const NftSchema = new mongoose.Schema({
     ref: "User",
     index: true,
   },
-  universityWalletId: {
+  institutionWalletId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Wallet",
     index: true,

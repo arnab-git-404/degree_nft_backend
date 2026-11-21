@@ -1,53 +1,44 @@
-const escapeHtml = (value) =>
-  String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+import nodemailer from "nodemailer";
+import PlatformSetting from "../models/platformSetting.js";
+import { decryptSecret } from "../utils/secretBox.js";
+import { renderEmail } from "../templates/email/index.js";
 
-const buildActivationHtml = ({ name, activationUrl }) => {
-  const safeName = escapeHtml(name || "there");
-  const safeUrl = escapeHtml(activationUrl);
-
-  return `
-    <div style="background:#f3efe6;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;color:#11100e">
-      <div style="max-width:560px;margin:0 auto;background:#fffdf8;border:1px solid rgba(17,16,14,0.2);padding:32px">
-        <p style="margin:0;font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:#6b665c">
-          DegreeNFT / Academic registry
-        </p>
-        <h1 style="margin:18px 0 0;font-family:Georgia,'Times New Roman',serif;font-size:38px;line-height:1.05;font-weight:400;letter-spacing:-0.03em">
-          Activate your account.
-        </h1>
-        <p style="margin:20px 0 0;font-size:15px;line-height:1.7;color:#3d3a34">
-          Hello ${safeName}, your DegreeNFT account has been created. Confirm your email
-          address to activate the account and sign in.
-        </p>
-        <p style="margin:26px 0 0">
-          <a href="${safeUrl}" style="display:inline-block;background:#2b2bea;color:#f3efe6;padding:13px 22px;text-decoration:none;font-size:11px;letter-spacing:0.16em;text-transform:uppercase">
-            Activate account
-          </a>
-        </p>
-        <p style="margin:24px 0 0;font-size:12px;line-height:1.6;color:#6b665c">
-          This link expires in ${Number(process.env.ACTIVATION_TOKEN_TTL_HOURS) || 24} hours.
-          If the button does not work, copy this address into your browser:
-        </p>
-        <p style="margin:8px 0 0;font-size:11px;line-height:1.6;word-break:break-all;color:#2b2bea">
-          ${safeUrl}
-        </p>
-        <p style="margin:28px 0 0;border-top:1px solid rgba(17,16,14,0.15);padding-top:16px;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#8a8478">
-          If you did not create this account, you can ignore this message.
-        </p>
-      </div>
-    </div>
-  `;
+// SMTP from Admin → Settings, with its decrypted password. Null when SMTP is not usable.
+export const loadSmtpSettings = async () => {
+  const settings = await PlatformSetting.findOne({ key: "platform" }).select("+smtp.passwordEncrypted");
+  return settings?.smtp?.host ? settings.smtp : null;
 };
 
-export const sendActivationEmail = async ({ to, name, activationUrl }) => {
+export const createSmtpTransport = (smtp) =>
+  nodemailer.createTransport({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    auth: smtp.username ? { user: smtp.username, pass: smtp.passwordEncrypted ? decryptSecret(smtp.passwordEncrypted) : "" } : undefined,
+    // Fail fast instead of hanging a request on an unreachable server.
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 20000,
+  });
+
+export const smtpFrom = (smtp) => ({ name: smtp.fromName || "DegreeNFT", address: smtp.fromEmail });
+
+/**
+ * Send one email. Order: platform SMTP (if enabled in Admin → Settings) → Resend (RESEND_API_KEY in .env)
+ * → print to the server log. Returns { delivered, provider }; throws when the chosen provider fails.
+ */
+export const sendMail = async ({ to, subject, html, text }) => {
+  const smtp = await loadSmtpSettings();
+
+  if (smtp?.enabled) {
+    await createSmtpTransport(smtp).sendMail({ from: smtpFrom(smtp), to, subject, html, text });
+    return { delivered: true, provider: "smtp" };
+  }
+
   const apiKey = process.env.RESEND_API_KEY;
 
   if (!apiKey) {
-    console.log(`[DegreeNFT] Activation link for ${to}: ${activationUrl}`);
+    console.log(`[DegreeNFT] Email to ${to} (${subject}):\n${text}`);
     return { delivered: false, provider: "console" };
   }
 
@@ -60,16 +51,34 @@ export const sendActivationEmail = async ({ to, name, activationUrl }) => {
     body: JSON.stringify({
       from: process.env.MAIL_FROM || "DegreeNFT <onboarding@resend.dev>",
       to: [to],
-      subject: "Activate your DegreeNFT account",
-      html: buildActivationHtml({ name, activationUrl }),
-      text: `Hello ${name || "there"}, activate your DegreeNFT account: ${activationUrl}`,
+      subject,
+      html,
+      text,
     }),
   });
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`Activation email failed (${response.status}): ${detail}`);
+    throw new Error(`Email failed (${response.status}): ${detail}`);
   }
 
   return { delivered: true, provider: "resend" };
+};
+
+// Render a named template from templates/email with this email's data, then send it.
+export const sendTemplateEmail = (name, to, data) => sendMail({ to, ...renderEmail(name, data) });
+
+export const sendActivationEmail = ({ to, name, activationUrl }) =>
+  sendTemplateEmail("activation", to, { name, activationUrl });
+
+// For flows that must not fail because of email: returns the delivery label the UI shows
+// ("sent", "console" = printed to the server log, or "failed").
+export const trySendTemplateEmail = async (name, to, data) => {
+  try {
+    const result = await sendTemplateEmail(name, to, data);
+    return result.delivered ? "sent" : result.provider;
+  } catch (error) {
+    console.error(`Email "${name}" to ${to} failed:`, error.message);
+    return "failed";
+  }
 };

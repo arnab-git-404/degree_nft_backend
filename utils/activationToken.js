@@ -1,26 +1,26 @@
 import { createHash, randomBytes } from "node:crypto";
 
-export const createActivationToken = () => {
+// A college's invite to a student to claim their profile with a wallet stays valid this long.
+export const STUDENT_INVITE_DAYS = 7;
+
+export const createActivationToken = (
+  ttlHours = Number(process.env.ACTIVATION_TOKEN_TTL_HOURS) || 24
+) => {
   const token = randomBytes(32).toString("hex");
 
   return {
     token,
     hash: hashActivationToken(token),
-    expiresAt: new Date(
-      Date.now() +
-        (Number(process.env.ACTIVATION_TOKEN_TTL_HOURS) || 24) * 60 * 60 * 1000
-    ),
+    expiresAt: new Date(Date.now() + ttlHours * 60 * 60 * 1000),
   };
 };
 
 export const hashActivationToken = (token) =>
   createHash("sha256").update(String(token)).digest("hex");
 
-export const buildActivationUrl = (token) => {
-  const base = (process.env.FRONTEND_URL || "http://localhost:5173").replace(
-    /\/+$/,
-    ""
-  );
+const frontendBase = () =>
+  (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/+$/, "");
 
-  return `${base}/activate/${token}`;
-};
+export const buildActivationUrl = (token) => `${frontendBase()}/activate/${token}`;
+
+export const buildClaimUrl = (token) => `${frontendBase()}/claim/${token}`;

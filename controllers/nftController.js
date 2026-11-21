@@ -1,11 +1,15 @@
+import { audit } from "../utils/audit.js";
+import mongoose from "mongoose";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
-import University from "../models/university.js";
+import Institution from "../models/institution.js";
 import Wallet from "../models/wallet.js";
 import StudentDetails from "../models/studentDetails.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
+import { verifyCredentialMint } from "../utils/solana.js";
+import { hasPermission } from "../middleware/auth.js";
 import { findOrCreateUserByWallet } from "../services/userWalletService.js";
 
 const getStudentWallet = async (user, walletAddress) => {
@@ -24,7 +28,7 @@ const getStudentWallet = async (user, walletAddress) => {
       return wallet;
     }
 
-    if (user.roleId?.name === "admin") {
+    if (hasPermission(user, "platform:manage")) {
       const anyWallet = await Wallet.findOne({
         chain: "solana",
         address: walletAddress,
@@ -58,32 +62,32 @@ const walletFilter = (wallet) => {
   return { $or: conditions };
 };
 
-const resolveUniversityReferences = async (nft) => {
-  let universityId = nft.universityId;
-  let universityWalletId = nft.universityWalletId;
+const resolveInstitutionReferences = async (nft) => {
+  let institutionId = nft.institutionId;
+  let institutionWalletId = nft.institutionWalletId;
 
-  if (!universityId && nft.universityWallet) {
-    const university = await University.findOne({
-      walletAddress: nft.universityWallet,
+  if (!institutionId && nft.institutionWallet) {
+    const institution = await Institution.findOne({
+      walletAddress: nft.institutionWallet,
     });
 
-    if (university) {
-      universityId = university._id;
+    if (institution) {
+      institutionId = institution._id;
     }
   }
 
-  if (!universityWalletId && nft.universityWallet) {
+  if (!institutionWalletId && nft.institutionWallet) {
     const wallet = await Wallet.findOne({
       chain: "solana",
-      address: nft.universityWallet,
+      address: nft.institutionWallet,
     });
 
     if (wallet) {
-      universityWalletId = wallet._id;
+      institutionWalletId = wallet._id;
     }
   }
 
-  return { universityId, universityWalletId };
+  return { institutionId, institutionWalletId };
 };
 
 export const createNftAllocation = asyncHandler(async (req, res) => {
@@ -104,18 +108,13 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     throw new AppError("Invalid student wallet address", 400);
   }
 
-  let university;
+  // Verified by requireInstitution: the caller's active membership, never a body field.
+  const institution = req.institution;
 
-  if (req.user.roleId?.name === "admin" && req.body.universityId) {
-    university = await University.findById(req.body.universityId);
-  } else {
-    university = await University.findOne({ userId: req.user._id });
-  }
-
-  if (!university) {
+  if (institution.verificationStatus !== "VERIFIED" || institution.status !== "ACTIVE") {
     throw new AppError(
-      "University profile not found. Create a university profile first.",
-      400
+      "Institution must be verified and active before issuing credentials",
+      403
     );
   }
 
@@ -123,8 +122,8 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     ipfsHash,
     studentWallet,
     $or: [
-      { universityId: university._id },
-      { universityWallet: university.walletAddress },
+      { institutionId: institution._id },
+      { institutionWallet: institution.walletAddress },
     ],
   });
 
@@ -138,14 +137,14 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
   const { user: student, wallet: studentWalletDocument } =
     await findOrCreateUserByWallet(studentWallet);
 
-  const universityWallet = await Wallet.findOne({
+  const institutionWallet = await Wallet.findOne({
     chain: "solana",
-    address: university.walletAddress,
+    address: institution.walletAddress,
   });
 
-  if (universityWallet && !university.walletId) {
-    university.walletId = universityWallet._id;
-    await university.save();
+  if (institutionWallet && !institution.walletId) {
+    institution.walletId = institutionWallet._id;
+    await institution.save();
   }
 
   const allocation = await NFT.create({
@@ -153,11 +152,11 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
     symbol,
     uri,
     ipfsHash,
-    universityWallet: university.walletAddress,
+    institutionWallet: institution.walletAddress,
     studentWallet,
-    universityId: university._id,
+    institutionId: institution._id,
     studentId: student._id,
-    universityWalletId: universityWallet?._id,
+    institutionWalletId: institutionWallet?._id,
     studentWalletId: studentWalletDocument._id,
     sellerFeeBasisPoints,
     allocated: true,
@@ -166,27 +165,28 @@ export const createNftAllocation = asyncHandler(async (req, res) => {
   });
 
   await StudentDetails.findOneAndUpdate(
-    { universityId: university._id, studentId: student._id },
+    { institutionId: institution._id, studentId: student._id },
     {
       $setOnInsert: {
         studentName: student.name,
         studentWalletAddress: studentWallet,
         studentId: student._id,
-        universityId: university._id,
+        institutionId: institution._id,
         studentWalletId: studentWalletDocument._id,
-        universityWalletId: universityWallet?._id,
-        universityWalletAddress: university.walletAddress,
-        universityName: university.name,
+        institutionWalletId: institutionWallet?._id,
+        institutionWalletAddress: institution.walletAddress,
+        institutionName: institution.name,
       },
       $inc: { totalAllocatedNFTs: 1 },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
-  await University.updateOne(
-    { _id: university._id },
+  await Institution.updateOne(
+    { _id: institution._id },
     { $inc: { totalAllocated: 1 } }
   );
+  await audit(req, { action: "credential.allocate", scope: "INSTITUTION", targetType: "Credential", targetId: allocation._id, summary: `Issued "${name}" to ${studentWallet}`, details: { ipfsHash } });
 
   res.status(201).json({
     success: true,
@@ -205,7 +205,7 @@ export const checkAuthorization = asyncHandler(async (req, res) => {
     ...walletFilter(wallet),
   })
     .sort({ allocatedAt: 1 })
-    .populate("universityId", "name code walletAddress");
+    .populate("institutionId", "name code walletAddress");
 
   const existingReport = await Reports.findOne(walletFilter(wallet));
 
@@ -221,7 +221,7 @@ export const checkAuthorization = asyncHandler(async (req, res) => {
         ipfsHash: unmintedAllocation.ipfsHash,
         confirmationStatus: unmintedAllocation.nftStatus,
         sellerFeeBasisPoints: unmintedAllocation.sellerFeeBasisPoints,
-        universityName: unmintedAllocation.universityId?.name || null,
+        institutionName: unmintedAllocation.institutionId?.name || null,
       },
     });
     return;
@@ -257,6 +257,10 @@ export const confirmCredential = asyncHandler(async (req, res) => {
   };
 
   if (nftId) {
+    // A plain id only: an object like {"$ne": null} would act as a query operator.
+    if (!mongoose.isValidObjectId(nftId)) {
+      throw new AppError("Invalid nftId", 400);
+    }
     filter._id = nftId;
   }
 
@@ -279,11 +283,44 @@ export const confirmCredential = asyncHandler(async (req, res) => {
   nft.confirmedAt = new Date();
 
   await nft.save();
+  await audit(req, { action: "credential.confirm", scope: "INSTITUTION", institutionId: nft.institutionId, targetType: "Credential", targetId: nft._id, summary: `Student confirmed "${nft.name}"` });
 
   res.status(200).json({
     success: true,
     message: "NFT details are confirmed",
   });
+});
+
+// Pins credential metadata server-side so Pinata keys never reach the browser.
+export const pinMetadata = asyncHandler(async (req, res) => {
+  const metadata = req.body;
+
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || !metadata.name) {
+    throw new AppError("Metadata JSON with a name is required", 400);
+  }
+
+  if (!process.env.PINATA_API_KEY || !process.env.PINATA_API_SECRET) {
+    throw new AppError("IPFS pinning is not configured on the server", 503);
+  }
+
+  const response = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      pinata_api_key: process.env.PINATA_API_KEY,
+      pinata_secret_api_key: process.env.PINATA_API_SECRET,
+    },
+    body: JSON.stringify(metadata),
+  });
+
+  if (!response.ok) {
+    console.error("Pinata pin failed:", response.status, await response.text());
+    throw new AppError("Failed to upload metadata to IPFS", 502);
+  }
+
+  const { IpfsHash } = await response.json();
+  await audit(req, { action: "credential.metadata.pin", scope: "INSTITUTION", targetType: "IPFS", targetId: IpfsHash, summary: `Pinned metadata for "${metadata.name}"` });
+  res.status(200).json({ success: true, IpfsHash });
 });
 
 export const confirmMint = asyncHandler(async (req, res) => {
@@ -302,6 +339,10 @@ export const confirmMint = asyncHandler(async (req, res) => {
   };
 
   if (nftId) {
+    // A plain id only: an object like {"$ne": null} would act as a query operator.
+    if (!mongoose.isValidObjectId(nftId)) {
+      throw new AppError("Invalid nftId", 400);
+    }
     filter._id = nftId;
   }
 
@@ -314,6 +355,21 @@ export const confirmMint = asyncHandler(async (req, res) => {
     );
   }
 
+  if (await NFT.exists({ nftAddress: nft_Mint_Address })) {
+    throw new AppError("This mint address is already recorded", 409);
+  }
+
+  // Never trust the client's word that a mint happened: check the chain.
+  try {
+    await verifyCredentialMint({
+      mintAddress: nft_Mint_Address,
+      ownerAddress: wallet.address,
+      expectedUri: allocation.uri,
+    });
+  } catch (error) {
+    throw new AppError(`Mint could not be verified: ${error.message}`, 400);
+  }
+
   if (!allocation.studentId && wallet.userId) {
     allocation.studentId = wallet.userId;
   }
@@ -322,15 +378,15 @@ export const confirmMint = asyncHandler(async (req, res) => {
     allocation.studentWalletId = wallet._id;
   }
 
-  const { universityId, universityWalletId } =
-    await resolveUniversityReferences(allocation);
+  const { institutionId, institutionWalletId } =
+    await resolveInstitutionReferences(allocation);
 
-  if (!allocation.universityId && universityId) {
-    allocation.universityId = universityId;
+  if (!allocation.institutionId && institutionId) {
+    allocation.institutionId = institutionId;
   }
 
-  if (!allocation.universityWalletId && universityWalletId) {
-    allocation.universityWalletId = universityWalletId;
+  if (!allocation.institutionWalletId && institutionWalletId) {
+    allocation.institutionWalletId = institutionWalletId;
   }
 
   allocation.nftStatus = "MINTED";
@@ -340,22 +396,24 @@ export const confirmMint = asyncHandler(async (req, res) => {
 
   await allocation.save();
 
-  if (allocation.universityId) {
-    await University.updateOne(
-      { _id: allocation.universityId },
+  if (allocation.institutionId) {
+    await Institution.updateOne(
+      { _id: allocation.institutionId },
       { $inc: { totalMinted: 1 } }
     );
   }
 
-  if (allocation.universityId && allocation.studentId) {
+  if (allocation.institutionId && allocation.studentId) {
     await StudentDetails.updateOne(
       {
-        universityId: allocation.universityId,
+        institutionId: allocation.institutionId,
         studentId: allocation.studentId,
       },
       { $inc: { studentTotalMintedNFT: 1 } }
     );
   }
+
+  await audit(req, { action: "credential.mint", scope: "INSTITUTION", institutionId: allocation.institutionId, targetType: "Credential", targetId: allocation._id, summary: `Minted "${allocation.name}" as ${nft_Mint_Address}` });
 
   res.status(200).json({
     success: true,
@@ -372,7 +430,7 @@ export const getMintedNfts = asyncHandler(async (req, res) => {
     ...walletFilter(wallet),
   })
     .sort({ mintedAt: -1 })
-    .populate("universityId", "name code walletAddress");
+    .populate("institutionId", "name code walletAddress");
 
   const formattedNfts = mintedNfts.map((nft, index) => ({
     id: index + 1,
@@ -384,7 +442,7 @@ export const getMintedNfts = asyncHandler(async (req, res) => {
     symbol: nft.symbol,
     uri: nft.uri,
     ipfsHash: nft.ipfsHash,
-    universityName: nft.universityId?.name || null,
+    institutionName: nft.institutionId?.name || null,
   }));
 
   res.status(200).json({ nfts: formattedNfts });
@@ -429,21 +487,22 @@ export const createReport = asyncHandler(async (req, res) => {
     throw new AppError("Report already exists", 409);
   }
 
-  const { universityId, universityWalletId } =
-    await resolveUniversityReferences(nft);
+  const { institutionId, institutionWalletId } =
+    await resolveInstitutionReferences(nft);
 
   const report = await Reports.create({
-    universityWallet: nft.universityWallet,
+    institutionWallet: nft.institutionWallet,
     studentWallet: wallet.address,
-    universityId: universityId || undefined,
+    institutionId: institutionId || undefined,
     studentId: nft.studentId || wallet.userId || req.user._id,
-    universityWalletId: universityWalletId || undefined,
+    institutionWalletId: institutionWalletId || undefined,
     studentWalletId: nft.studentWalletId || wallet._id || undefined,
     nftIpfsHash,
     reportType,
     reportDetails,
     reportedOn: new Date(),
   });
+  await audit(req, { action: "report.create", scope: "INSTITUTION", institutionId: report.institutionId, targetType: "Report", targetId: report._id, summary: `Reported issue "${reportType}" on "${nft.name}"` });
 
   res.status(201).json({
     success: true,
