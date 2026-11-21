@@ -1,4 +1,6 @@
-import CredentialType, { ensureCredentialTypes } from "../models/credentialType.js";
+import CredentialType, {
+  ensureCredentialTypes,
+} from "../models/credentialType.js";
 import { colorFromSeed, hashString } from "../utils/color.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
@@ -8,23 +10,41 @@ import { audit } from "../utils/audit.js";
 const EDITABLE = ["name", "description", "color", "status"];
 
 const pick = (source, keys) =>
-  Object.fromEntries(keys.filter((key) => source?.[key] !== undefined).map((key) => [key, source[key]]));
+  Object.fromEntries(
+    keys
+      .filter((key) => source?.[key] !== undefined)
+      .map((key) => [key, source[key]]),
+  );
 
 export const listCredentialTypes = asyncHandler(async (req, res) => {
   await ensureCredentialTypes(req.institution._id);
-  const credentialTypes = await CredentialType.find({ institutionId: req.institution._id }).sort({ name: 1 }).lean();
+  const credentialTypes = await CredentialType.find({
+    institutionId: req.institution._id,
+  })
+    .sort({ name: 1 })
+    .lean();
   res.status(200).json({
     success: true,
-    credentialTypes: credentialTypes.map((type) => ({ ...type, color: type.color ?? colorFromSeed(hashString(type.code)) })),
+    credentialTypes: credentialTypes.map((type) => ({
+      ...type,
+      color: type.color ?? colorFromSeed(hashString(type.code)),
+    })),
   });
 });
 
 export const createCredentialType = asyncHandler(async (req, res) => {
   let credentialType;
   try {
-    credentialType = await CredentialType.create({ ...pick(req.body, ["code", ...EDITABLE]), institutionId: req.institution._id });
+    credentialType = await CredentialType.create({
+      ...pick(req.body, ["code", ...EDITABLE]),
+      institutionId: req.institution._id,
+    });
   } catch (error) {
-    if (error.code === 11000) throw new AppError("This college already has a credential type with that code", 409);
+    if (error.code === 11000)
+      throw new AppError(
+        "This college already has a credential type with that code",
+        409,
+      );
     throw error;
   }
   await audit(req, {
@@ -38,9 +58,13 @@ export const createCredentialType = asyncHandler(async (req, res) => {
 });
 
 export const updateCredentialType = asyncHandler(async (req, res) => {
-  if (req.body?.code !== undefined) throw new AppError("A credential type code cannot be changed", 400);
+  if (req.body?.code !== undefined)
+    throw new AppError("A credential type code cannot be changed", 400);
 
-  const credentialType = await CredentialType.findOne({ _id: req.params.credentialTypeId, institutionId: req.institution._id });
+  const credentialType = await CredentialType.findOne({
+    _id: req.params.credentialTypeId,
+    institutionId: req.institution._id,
+  });
   if (!credentialType) throw new AppError("Credential type not found", 404);
 
   const before = pick(credentialType.toObject(), EDITABLE);
