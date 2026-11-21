@@ -25,7 +25,7 @@ export const protect = asyncHandler(async (req, res, next) => {
   }
 
   if (!user.roleId || !user.roleId.isActive) {
-    throw new AppError("Your assigned role is inactive", 403);
+    throw new AppError("Your access has been revoked: your role is inactive", 403, "ACCESS_REVOKED");
   }
 
   req.user = user;
@@ -71,7 +71,7 @@ export const requireInstitution = (permission) =>
     const institution = membership.institutionId;
 
     if (!role?.isActive || role.scope !== "INSTITUTION") {
-      throw new AppError("Your institution role is inactive", 403);
+      throw new AppError("Your access has been revoked: your role at this institution is inactive", 403, "ACCESS_REVOKED");
     }
 
     if (!institution || institution.status !== "ACTIVE") {

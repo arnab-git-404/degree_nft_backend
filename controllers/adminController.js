@@ -6,9 +6,10 @@ import Institution from "../models/institution.js";
 import { INSTITUTION_STATUSES } from "../models/institution.js";
 import NFT from "../models/nft.js";
 import Reports from "../models/reports.js";
-import AuditLog, { AUDIT_METHODS, AUDIT_SCOPES } from "../models/auditLog.js";
 import InstitutionApplication from "../models/institutionApplication.js";
+import InstitutionMembership from "../models/institutionMembership.js";
 import * as staffService from "../services/staffService.js";
+import { listAuditLogs } from "../services/auditService.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import {
@@ -68,6 +69,8 @@ const serializeRole = (role, userCount = 0) => {
     description: value.description || "",
     permissions: value.permissions || [],
     scope: value.scope || "PLATFORM",
+    // A college's own role: { _id, name, code } when populated, else the id; null = shared.
+    institution: value.institutionId || null,
     isSystem: Boolean(value.isSystem),
     isActive: Boolean(value.isActive),
     userCount,
@@ -76,16 +79,23 @@ const serializeRole = (role, userCount = 0) => {
   };
 };
 
+// Holders of a role: accounts for PLATFORM roles, college memberships for INSTITUTION roles.
 const getRoleUserCounts = async (roleIds) => {
   if (!roleIds.length) return new Map();
 
-  const counts = await User.aggregate([
-    { $match: { roleId: { $in: roleIds } } },
-    { $group: { _id: "$roleId", count: { $sum: 1 } } },
-  ]);
-
-  return new Map(counts.map((entry) => [String(entry._id), entry.count]));
+  const group = [{ $match: { roleId: { $in: roleIds } } }, { $group: { _id: "$roleId", count: { $sum: 1 } } }];
+  const [users, members] = await Promise.all([User.aggregate(group), InstitutionMembership.aggregate(group)]);
+  const counts = new Map();
+  for (const entry of [...users, ...members]) {
+    counts.set(String(entry._id), (counts.get(String(entry._id)) || 0) + entry.count);
+  }
+  return counts;
 };
+
+const countRoleHolders = (role) =>
+  role.scope === "INSTITUTION"
+    ? InstitutionMembership.countDocuments({ roleId: role._id })
+    : User.countDocuments({ roleId: role._id });
 
 const getPagination = (query) => {
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
@@ -146,6 +156,7 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
 export const getRoles = asyncHandler(async (req, res) => {
   const includeInactive = req.query.includeInactive === "true";
   const roles = await Role.find(includeInactive ? {} : { isActive: true })
+    .populate("institutionId", "name code")
     .sort({ isSystem: -1, name: 1 })
     .lean();
   const counts = await getRoleUserCounts(roles.map((role) => role._id));
@@ -306,15 +317,9 @@ export const updateRole = asyncHandler(async (req, res) => {
         throw new AppError("System roles cannot be deactivated", 400);
       }
 
-      const assignedUsers = await User.countDocuments({ roleId: role._id });
-
-      if (assignedUsers > 0) {
-        throw new AppError(
-          `Reassign ${assignedUsers} user${
-            assignedUsers === 1 ? "" : "s"
-          } before deactivating this role`,
-          400
-        );
+      // People holding an inactive role lose access (they see the "access revoked" page), but never the person doing this.
+      if (req.user.roleId?._id?.equals(role._id)) {
+        throw new AppError("You hold this role; deactivating it would lock you out", 409);
       }
     }
 
@@ -324,44 +329,11 @@ export const updateRole = asyncHandler(async (req, res) => {
   await role.save();
   await audit(req, { action: "admin.role.update", targetType: "Role", targetId: role._id, summary: `Updated role ${role.name}`, details: { changed: Object.keys(req.body || {}), permissions: role.permissions, isActive: role.isActive } });
 
-  const userCount = await User.countDocuments({ roleId: role._id });
+  const userCount = await countRoleHolders(role);
 
   res.status(200).json({
     success: true,
     role: serializeRole(role, userCount),
-  });
-});
-
-export const deleteRole = asyncHandler(async (req, res) => {
-  assertValidRoleId(req.params.roleId);
-
-  const role = await Role.findById(req.params.roleId);
-
-  if (!role) {
-    throw new AppError("Role not found", 404);
-  }
-
-  if (role.isSystem) {
-    throw new AppError("System roles cannot be deleted", 400);
-  }
-
-  const assignedUsers = await User.countDocuments({ roleId: role._id });
-
-  if (assignedUsers > 0) {
-    throw new AppError(
-      `Reassign ${assignedUsers} user${
-        assignedUsers === 1 ? "" : "s"
-      } before deleting this role`,
-      400
-    );
-  }
-
-  await role.deleteOne();
-  await audit(req, { action: "admin.role.delete", targetType: "Role", targetId: role._id, summary: `Deleted role ${role.name}` });
-
-  res.status(200).json({
-    success: true,
-    message: "Role deleted",
   });
 });
 
@@ -385,6 +357,14 @@ export const getUsers = asyncHandler(async (req, res) => {
     filter.roleId = roleDocument._id;
   }
 
+  // Accounts stay global; ?institutionId= narrows the list to people with a membership in that college.
+  if (req.query.institutionId) {
+    if (!/^[a-f0-9]{24}$/i.test(String(req.query.institutionId))) {
+      throw new AppError("Invalid institutionId", 400);
+    }
+    filter._id = { $in: await InstitutionMembership.distinct("userId", { institutionId: String(req.query.institutionId) }) };
+  }
+
   const [users, total] = await Promise.all([
     User.find(filter)
       .populate("roleId")
@@ -395,9 +375,21 @@ export const getUsers = asyncHandler(async (req, res) => {
     User.countDocuments(filter),
   ]);
 
+  // Each user's colleges (any status), so the global list shows who belongs where.
+  const memberships = await InstitutionMembership.find({ userId: { $in: users.map((user) => user._id) } })
+    .populate("institutionId", "name code")
+    .populate("roleId", "displayName")
+    .select("userId institutionId roleId status")
+    .lean();
+
   res.status(200).json({
     success: true,
-    users: users.map((user) => user.toJSON()),
+    users: users.map((user) => ({
+      ...user.toJSON(),
+      memberships: memberships
+        .filter((membership) => String(membership.userId) === String(user._id) && membership.institutionId)
+        .map(({ _id, institutionId, roleId, status }) => ({ _id, institution: institutionId, role: roleId, status })),
+    })),
     pagination: paginationMeta(page, limit, total),
   });
 });
@@ -620,69 +612,10 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
   });
 });
 
-const assertValidObjectId = (value, field) => {
-  if (!/^[a-f0-9]{24}$/i.test(String(value))) {
-    throw new AppError(`Invalid ${field}`, 400);
-  }
-};
-
 // Activity log. `type` is a scope (PLATFORM / INSTITUTION / ACCOUNT) or FAILURE for rejected attempts;
 // `method` is POST / PUT / PATCH / DELETE. `stats` always covers the whole log, not the current filter.
 export const getAuditLogs = asyncHandler(async (req, res) => {
-  const { page, limit, skip } = getPagination(req.query);
-  const { type, method, search, institutionId, actorId } = req.query;
-  const filter = {};
-
-  if (type === "FAILURE") {
-    filter.outcome = "FAILURE";
-  } else if (AUDIT_SCOPES.includes(type)) {
-    filter.scope = type;
-  }
-
-  if (AUDIT_METHODS.includes(method)) {
-    filter.method = method;
-  }
-
-  if (institutionId) {
-    assertValidObjectId(institutionId, "institutionId");
-    filter.institutionId = institutionId;
-  }
-
-  if (actorId) {
-    assertValidObjectId(actorId, "actorId");
-    filter.actorId = actorId;
-  }
-
-  if (search) {
-    const regex = new RegExp(escapeRegex(search), "i");
-    filter.$or = [{ action: regex }, { summary: regex }, { actorName: regex }, { targetId: regex }];
-  }
-
-  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const [logs, total, allLogs, failures, last24h, ...methodCounts] = await Promise.all([
-    AuditLog.find(filter)
-      .populate("institutionId", "name code")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit),
-    AuditLog.countDocuments(filter),
-    AuditLog.countDocuments(),
-    AuditLog.countDocuments({ outcome: "FAILURE" }),
-    AuditLog.countDocuments({ createdAt: { $gte: dayAgo } }),
-    ...AUDIT_METHODS.map((name) => AuditLog.countDocuments({ method: name })),
-  ]);
-
-  res.status(200).json({
-    success: true,
-    logs,
-    stats: {
-      total: allLogs,
-      failures,
-      last24h,
-      methods: Object.fromEntries(AUDIT_METHODS.map((name, i) => [name, methodCounts[i]])),
-    },
-    pagination: paginationMeta(page, limit, total),
-  });
+  res.status(200).json({ success: true, ...(await listAuditLogs(req)) });
 });
 
 export const getApplications = asyncHandler(async (req, res) => {

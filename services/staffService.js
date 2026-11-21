@@ -9,7 +9,7 @@ import { audit } from "../utils/audit.js";
 import AppError from "../utils/AppError.js";
 
 // A role holding any of these is an admin role: only the Super Admin may grant, change or remove it.
-const ADMIN_PERMISSIONS = ["*", "staff:invite", "staff:manage"];
+const ADMIN_PERMISSIONS = ["*", "staff:invite", "staff:manage", "role:manage"];
 const EMAIL_PATTERN = /^\S+@\S+\.\S+$/;
 const OBJECT_ID = /^[a-f0-9]{24}$/i;
 
@@ -19,17 +19,22 @@ const assertId = (id, label) => {
   if (!OBJECT_ID.test(String(id || ""))) throw new AppError(`Invalid ${label}`, 400);
 };
 
-const ROLE_FIELDS = "name displayName description permissions";
+const ROLE_FIELDS = "name displayName description permissions institutionId";
+
+// Roles usable in one college: the shared ones plus the college's own.
+export const collegeRoleFilter = (institutionId) => ({ scope: "INSTITUTION", institutionId: { $in: [null, institutionId] } });
 
 // Roles this actor may hand out in a college: a head gets only roles beneath Institution Admin.
-export const assignableRoles = async ({ asSuperAdmin }) => {
-  const roles = await Role.find({ scope: "INSTITUTION", isActive: true }).select(ROLE_FIELDS).sort({ name: 1 });
+export const assignableRoles = async (institution, { asSuperAdmin }) => {
+  const roles = await Role.find({ ...collegeRoleFilter(institution._id), isActive: true })
+    .select(ROLE_FIELDS)
+    .sort({ displayName: 1 });
   return asSuperAdmin ? roles : roles.filter((role) => !isAdminRole(role));
 };
 
-const findAssignableRole = async (roleId, { asSuperAdmin }) => {
+const findAssignableRole = async (institution, roleId, { asSuperAdmin }) => {
   assertId(roleId, "roleId");
-  const role = await Role.findOne({ _id: roleId, scope: "INSTITUTION", isActive: true });
+  const role = await Role.findOne({ _id: roleId, ...collegeRoleFilter(institution._id), isActive: true });
   if (!role) throw new AppError("Choose an active institution role", 400);
   if (!asSuperAdmin && isAdminRole(role)) {
     throw new AppError("Only the Super Admin can assign an admin role", 403);
@@ -45,7 +50,7 @@ export const listMembers = async (institution, { asSuperAdmin }) => {
       .populate("roleId", ROLE_FIELDS)
       .populate("invitedBy", "name")
       .sort({ createdAt: 1 }),
-    assignableRoles({ asSuperAdmin }),
+    assignableRoles(institution, { asSuperAdmin }),
   ]);
 
   return { members, roles, primaryAdminMembershipId: institution.primaryAdminMembershipId || null };
@@ -62,7 +67,7 @@ export const inviteMember = async (req, institution, body, { asSuperAdmin }) => 
   if (!EMAIL_PATTERN.test(email) || email.length > 200) throw new AppError("Provide a valid email address", 400);
   if (name.length > 120) throw new AppError("name must be 120 characters or fewer", 400);
 
-  const role = await findAssignableRole(body?.roleId, { asSuperAdmin });
+  const role = await findAssignableRole(institution, body?.roleId, { asSuperAdmin });
   let user = await User.findOne({ email });
 
   if (user) {
@@ -177,7 +182,7 @@ export const updateMember = async (req, institution, membershipId, body, { asSup
   const before = { role: membership.roleId?.name, status: membership.status };
 
   if (roleId !== undefined) {
-    const role = await findAssignableRole(roleId, { asSuperAdmin });
+    const role = await findAssignableRole(institution, roleId, { asSuperAdmin });
     if (isHead && !isAdminRole(role)) throw new AppError("Transfer the head to someone else before changing this role", 409);
     membership.roleId = role._id;
   }

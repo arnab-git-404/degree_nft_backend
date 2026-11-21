@@ -19,7 +19,6 @@ router.get("/roles", adminController.getRoles);
 router.post("/roles", adminController.createRole);
 router.get("/roles/:roleId/users", adminController.getRoleUsers);
 router.patch("/roles/:roleId", adminController.updateRole);
-router.delete("/roles/:roleId", adminController.deleteRole);
 
 router.get("/users", adminController.getUsers);
 router.patch("/users/:userId/role", adminController.updateUserRole);

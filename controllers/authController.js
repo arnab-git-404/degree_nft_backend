@@ -209,7 +209,7 @@ export const walletLogin = asyncHandler(auditFailures("auth.login.wallet", "ACCO
   await populateUser(user);
 
   if (!user.roleId?.isActive) {
-    throw new AppError("Your assigned role is inactive", 403);
+    throw new AppError("Your access has been revoked: your role is inactive", 403, "ACCESS_REVOKED");
   }
 
   await audit(req, { action: "auth.login.wallet", scope: "ACCOUNT", actor: user, targetType: "Wallet", targetId: wallet._id, summary: `Signed in with wallet ${walletAddress}` });
@@ -312,7 +312,7 @@ export const login = asyncHandler(auditFailures("auth.login.email", "ACCOUNT", (
   }
 
   if (!user.roleId?.isActive) {
-    throw new AppError("Your assigned role is inactive", 403);
+    throw new AppError("Your access has been revoked: your role is inactive", 403, "ACCESS_REVOKED");
   }
 
   if (!user.emailVerified) {

@@ -1,5 +1,7 @@
 import asyncHandler from "../utils/asyncHandler.js";
+import NFT from "../models/nft.js";
 import * as staffService from "../services/staffService.js";
+import { listAuditLogs } from "../services/auditService.js";
 
 // Colleges are created only by Super Admin approval of an application (registrationController.approveApplication).
 
@@ -7,6 +9,30 @@ export const getProfile = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     institution: req.institution,
+  });
+});
+
+// Credential counts for the batch upload stats board. Matches by wallet too, like createNftAllocation, for rows from before institutionId existed.
+export const getCredentialStats = asyncHandler(async (req, res) => {
+  const { _id, walletAddress } = req.institution;
+  const match = walletAddress
+    ? { $or: [{ institutionId: _id }, { institutionWallet: walletAddress }] }
+    : { institutionId: _id };
+  const groups = await NFT.aggregate([
+    { $match: match },
+    { $group: { _id: "$nftStatus", count: { $sum: 1 } } },
+  ]);
+  const count = (...statuses) =>
+    groups.filter((group) => statuses.includes(group._id)).reduce((sum, group) => sum + group.count, 0);
+
+  res.status(200).json({
+    success: true,
+    stats: {
+      total: groups.reduce((sum, group) => sum + group.count, 0),
+      pending: count(null, "PENDING_CONFIRMATION"),
+      confirmed: count("CONFIRMED", "AUTO_CONFIRMED"),
+      minted: count("MINTED"),
+    },
   });
 });
 
@@ -50,6 +76,11 @@ export const inviteStaff = asyncHandler(async (req, res) => {
 export const updateStaff = asyncHandler(async (req, res) => {
   const membership = await staffService.updateMember(req, req.institution, req.params.membershipId, req.body, { asSuperAdmin: false });
   res.status(200).json({ success: true, membership });
+});
+
+// The college's own activity log: always this college only, without IP or browser details.
+export const getActivity = asyncHandler(async (req, res) => {
+  res.status(200).json({ success: true, ...(await listAuditLogs(req, { base: { institutionId: req.institution._id }, hideNetwork: true })) });
 });
 
 export const getInvitations = asyncHandler(async (req, res) => {
