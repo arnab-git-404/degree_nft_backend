@@ -9,6 +9,7 @@ import * as enrollmentController from "../controllers/enrollmentController.js";
 import * as credentialTypeController from "../controllers/credentialTypeController.js";
 import * as chainController from "../controllers/chainController.js";
 import * as requestController from "../controllers/credentialRequestController.js";
+import * as verifyController from "../controllers/verifyController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
 import { protect, requirePermission, requireInstitution } from "../middleware/auth.js";
@@ -58,6 +59,9 @@ router.patch(
   requireInstitution("staff:manage"),
   institutionController.updateStaff
 );
+
+// Public verification (no login): the link and QR on every issued credential
+router.get("/verify/:assetAddress", verifyController.verifyCredential);
 
 // Credential lifecycle: academic status (one person), wallet recovery and burning (two approvals, two people)
 router.post("/institution/credentials/:credentialId/status", protect, requireInstitution("credential:revoke"), requestController.changeAcademicStatus);

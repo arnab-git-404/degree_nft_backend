@@ -2143,6 +2143,51 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal((await w.as(w.staff)("GET", "/institution/credential-requests")).status, 403);
     });
 
+    test("public verification: VERIFIED only when record, collection, chain, content and status all agree", async () => {
+      const w = await world();
+      const verify = async (address) => (await call("GET", `/verify/${address}`)).body;
+      assert.equal((await call("GET", "/verify/not-an-address")).status, 400);
+      assert.equal((await verify(Keypair.generate().publicKey.toBase58())).status, "NOT_FOUND");
+
+      await Student.updateOne({ _id: w.profile._id }, { fullName: "Rahul Kumar Sharma" });
+      const credential = await w.issue("QmLifeVerify");
+      const assetAddress = (await w.claim(credential)).body.nft.assetAddress;
+      const ok = await verify(assetAddress);
+      assert.equal(ok.status, "VERIFIED", JSON.stringify(ok));
+      assert.ok(ok.checks.every((check) => check.ok === true));
+      assert.equal(ok.credential.holder, "Rahul S."); // masked, not the full name
+      assert.equal(ok.college.name, "Smoke Institution");
+      assert.ok(!JSON.stringify(ok).includes("example.com")); // no email or other private data
+
+      fakeChain.rpcDown = true;
+      try {
+        assert.equal((await verify(assetAddress)).status, "VERIFICATION_UNAVAILABLE"); // never VERIFIED when the chain can't be read
+      } finally {
+        fakeChain.rpcDown = false;
+      }
+
+      const status = (next, reason) => w.as(w.head)("POST", `/institution/credentials/${credential._id}/status`, { status: next, reason });
+      await status("SUSPENDED", "Under review");
+      assert.equal((await verify(assetAddress)).status, "SUSPENDED");
+      await status("ACTIVE", "Review done");
+
+      // Our record and the chain disagree about the owner: not verified.
+      const realOwner = fakeChain.assets.get(assetAddress).owner;
+      fakeChain.assets.get(assetAddress).owner = Keypair.generate().publicKey.toBase58();
+      assert.equal((await verify(assetAddress)).status, "VERIFICATION_UNAVAILABLE");
+      fakeChain.assets.get(assetAddress).owner = realOwner;
+
+      // The record changed after minting: what the NFT says is no longer the current credential.
+      await Credential.updateOne({ _id: credential._id }, { contentHash: "changed" });
+      assert.equal((await verify(assetAddress)).status, "SUPERSEDED");
+      await Credential.updateOne({ _id: credential._id }, { contentHash: (await Nft.findOne({ assetAddress })).contentHash });
+
+      await status("REVOKED", "Degree withdrawn");
+      const revoked = await verify(assetAddress);
+      assert.equal(revoked.status, "REVOKED");
+      assert.equal(revoked.credential.academicStatus, "REVOKED");
+    });
+
     test("a request can be rejected with a reason, and then nothing happens", async () => {
       const w = await world();
       const credential = await w.issue("QmLifeReject");

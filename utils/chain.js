@@ -113,13 +113,15 @@ const real = {
     return { signature: bs58.encode(signature) };
   },
 
-  // null when the asset does not exist (never minted, or burned).
+  // null when the asset does not exist (never minted, or burned). An RPC failure throws, so callers never
+  // mistake "the chain is unreachable" for "the credential does not exist".
   async getAsset(address) {
     try {
       const asset = await fetchAsset(umiWithFeePayer(), address);
       return { owner: String(asset.owner), collection: String(asset.updateAuthority.address) };
-    } catch {
-      return null;
+    } catch (error) {
+      if (error?.name === "AccountNotFoundError") return null;
+      throw error;
     }
   },
 
@@ -200,7 +202,11 @@ export const fakeChain = {
     if (!fakeChain.assets.delete(assetAddress)) throw new Error("fake: asset not found");
     return { signature: fakeAddress() };
   },
-  getAsset: async (address) => (fakeChain.assets.has(address) ? { ...fakeChain.assets.get(address) } : null),
+  rpcDown: false, // tests: the chain is unreachable
+  async getAsset(address) {
+    if (fakeChain.rpcDown) throw new Error("fake: RPC unreachable");
+    return fakeChain.assets.has(address) ? { ...fakeChain.assets.get(address) } : null;
+  },
   findDeposits: async ({ from }) => fakeChain.deposits.filter((deposit) => deposit.from === from),
 };
 
