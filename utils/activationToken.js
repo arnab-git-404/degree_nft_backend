@@ -24,3 +24,5 @@ const frontendBase = () =>
 export const buildActivationUrl = (token) => `${frontendBase()}/activate/${token}`;
 
 export const buildClaimUrl = (token) => `${frontendBase()}/claim/${token}`;
+
+export const buildRecoveryUrl = (token) => `${frontendBase()}/recover/${token}`;

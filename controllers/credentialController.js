@@ -11,7 +11,12 @@ import StudentDetails from "../models/studentDetails.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { isValidSolanaAddress } from "../utils/solanaAuth.js";
-import { verifyCredentialMint } from "../utils/solana.js";
+import Nft from "../models/nft.js";
+import CollegeChain from "../models/collegeChain.js";
+import BillingEntry from "../models/billingEntry.js";
+import { getBalances, getPrices, pickPayment } from "../services/billingService.js";
+import { chain } from "../utils/chain.js";
+import { encryptSecret, decryptSecret } from "../utils/secretBox.js";
 import { hasPermission } from "../middleware/auth.js";
 import { findOrCreateUserByWallet } from "../services/userWalletService.js";
 
@@ -455,90 +460,143 @@ export const pinMetadata = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, IpfsHash });
 });
 
-export const recordMint = asyncHandler(async (req, res) => {
-  const { walletAddress, nft_Mint_Address } = req.body;
-
-  if (!nft_Mint_Address || !isValidSolanaAddress(nft_Mint_Address)) {
-    throw new AppError("A valid nft_Mint_Address is required", 400);
+// The student claims a confirmed credential; the backend mints it into the student's own (signed-in) wallet,
+// in the college's collection, paid by the platform and charged to the college's balance only on success.
+// Retries are safe: the asset address is fixed before sending, so a timed-out mint is checked on-chain, not minted again.
+export const claimCredential = asyncHandler(async (req, res) => {
+  const wallet = await getStudentWallet(req.user, req.body.walletAddress);
+  // Claiming again after success just returns the NFT (a double click, a retried request).
+  if (mongoose.isValidObjectId(req.body.credentialId)) {
+    const done = await Nft.findOne({ credentialId: req.body.credentialId, status: "MINTED", ownerWallet: wallet.address });
+    if (done) return res.status(200).json({ success: true, nft: publicNft(done) });
   }
-
-  const wallet = await getStudentWallet(req.user, walletAddress);
   const credential = await findOwnCredential(wallet, req.body);
 
+  if ((credential.academicStatus || "ACTIVE") !== "ACTIVE") {
+    throw new AppError(`This credential is ${credential.academicStatus.toLowerCase()} by your college and cannot be claimed`, 409);
+  }
   // A student's open report on this credential stops the mint until the college resolves or corrects it.
   if (await Reports.exists(openReportsOf(credential))) {
     throw new AppError("An open report on this credential blocks minting", 409);
   }
-
-  // Same rule the student screen shows: confirmed by the student, or the review window has passed.
+  // Confirmed by the student, or the review window has passed.
   if (!credential.isConfirmed && credential.confirmationDeadline > new Date()) {
-    throw new AppError("Confirm this credential before minting it", 403);
+    throw new AppError("Confirm this credential before claiming it", 403);
   }
 
-  if (await Credential.exists({ nftAddress: nft_Mint_Address })) {
-    throw new AppError("This mint address is already recorded", 409);
+  const college = await CollegeChain.findOne({ institutionId: credential.institutionId }).select("+keys.minting.secretEncrypted");
+  if (!college) throw new AppError("Your college is not set up for on-chain credentials yet", 409);
+
+  let nft = await Nft.findOne({ credentialId: credential._id }).select("+assetSecretEncrypted");
+  if (nft && nft.status === "MINTED") return res.status(200).json({ success: true, nft: publicNft(nft) });
+
+  if (!nft) {
+    const payment = pickPayment(await getBalances(credential.institutionId), await getPrices());
+    if (!payment) throw new AppError("Your college's DegreeNFT balance is too low to issue this credential. Please ask your college to top up.", 409);
+    const asset = chain.newKeypair();
+    try {
+      nft = await Nft.create({
+        credentialId: credential._id,
+        institutionId: credential.institutionId,
+        userId: wallet.userId,
+        network: college.network,
+        collectionAddress: college.collectionAddress,
+        assetAddress: asset.address,
+        assetSecretEncrypted: encryptSecret(asset.secret),
+        ownerWallet: wallet.address,
+        revision: credential.revision,
+        uri: credential.uri,
+        contentHash: credential.contentHash,
+        charge: payment,
+      });
+    } catch (error) {
+      if (error.code === 11000) throw new AppError("This credential is already being claimed. Refresh in a moment.", 409);
+      throw error;
+    }
   }
 
-  // Never trust the client's word that a mint happened: check the chain.
+  // Already on-chain (an earlier attempt landed after a timeout)? Then only record it.
+  if (!(await chain.getAsset(nft.assetAddress))) {
+    try {
+      const { signature } = await chain.mintAsset({
+        assetSecret: decryptSecret(nft.assetSecretEncrypted),
+        collectionAddress: nft.collectionAddress,
+        mintingSecret: decryptSecret(college.keys.minting.secretEncrypted),
+        owner: nft.ownerWallet,
+        name: credential.name,
+        uri: nft.uri,
+      });
+      nft.mintSignature = signature;
+      nft.attempts.push({ at: new Date(), outcome: "SENT", signature });
+    } catch (error) {
+      nft.attempts.push({ at: new Date(), outcome: "FAILED", error: String(error.message).slice(0, 300) });
+      if (!(await chain.getAsset(nft.assetAddress))) {
+        nft.status = "FAILED";
+        await nft.save();
+        throw new AppError("Minting did not go through. Nothing was charged; please try again.", 502);
+      }
+    }
+  } else {
+    nft.attempts.push({ at: new Date(), outcome: "FOUND_ON_CHAIN" });
+  }
+
+  // Never trust the send alone: the asset must exist, in the college collection, owned by the student.
+  const onChain = await chain.getAsset(nft.assetAddress);
+  if (!onChain || onChain.owner !== nft.ownerWallet || onChain.collection !== nft.collectionAddress) {
+    nft.status = "FAILED";
+    await nft.save();
+    throw new AppError("The minted credential could not be verified on-chain. Nothing was charged.", 502);
+  }
+
+  const now = new Date();
+  nft.set({ status: "MINTED", mintedAt: now, assetSecretEncrypted: undefined });
+  nft.ownerHistory.push({ wallet: nft.ownerWallet, at: now, reason: "MINTED", signature: nft.mintSignature });
+  await nft.save();
+
+  // shortcut: two claims at the same moment can each pass the balance check, leaving a small negative balance (owed); add a per-college lock if that matters.
   try {
-    await verifyCredentialMint({
-      mintAddress: nft_Mint_Address,
-      ownerAddress: wallet.address,
-      expectedUri: credential.uri,
+    await BillingEntry.create({
+      institutionId: nft.institutionId,
+      currency: nft.charge.currency,
+      kind: "CHARGE",
+      amount: -nft.charge.amount,
+      credentialId: credential._id,
+      note: `Credential minted: ${credential.name}`,
     });
   } catch (error) {
-    throw new AppError(`Mint could not be verified: ${error.message}`, 400);
+    if (error.code !== 11000) throw error; // already charged (a retried request)
   }
 
-  if (!credential.userId && wallet.userId) {
-    credential.userId = wallet.userId;
-  }
-
-  if (!credential.studentWalletId && wallet._id) {
-    credential.studentWalletId = wallet._id;
-  }
-
-  const { institutionId, institutionWalletId } =
-    await resolveInstitutionReferences(credential);
-
-  if (!credential.institutionId && institutionId) {
-    credential.institutionId = institutionId;
-  }
-
-  if (!credential.institutionWalletId && institutionWalletId) {
-    credential.institutionWalletId = institutionWalletId;
-  }
-
-  credential.status = "MINTED";
-  credential.minted = true;
-  credential.mintedAt = new Date();
-  credential.nftAddress = nft_Mint_Address;
-
+  credential.set({ status: "MINTED", minted: true, mintedAt: now, nftAddress: nft.assetAddress });
+  if (!credential.userId && wallet.userId) credential.userId = wallet.userId;
+  if (!credential.studentWalletId && wallet._id) credential.studentWalletId = wallet._id;
   await credential.save();
-
-  if (credential.institutionId) {
-    await Institution.updateOne(
-      { _id: credential.institutionId },
-      { $inc: { totalMinted: 1 } }
-    );
+  await Institution.updateOne({ _id: credential.institutionId }, { $inc: { totalMinted: 1 } });
+  if (credential.userId) {
+    await StudentDetails.updateOne({ institutionId: credential.institutionId, userId: credential.userId }, { $inc: { studentTotalMintedNFT: 1 } });
   }
 
-  if (credential.institutionId && credential.userId) {
-    await StudentDetails.updateOne(
-      {
-        institutionId: credential.institutionId,
-        userId: credential.userId,
-      },
-      { $inc: { studentTotalMintedNFT: 1 } }
-    );
-  }
-
-  await audit(req, { action: "credential.mint", scope: "INSTITUTION", institutionId: credential.institutionId, targetType: "Credential", targetId: credential._id, summary: `Minted "${credential.name}" as ${nft_Mint_Address}` });
-
-  res.status(200).json({
-    success: true,
-    message: "Mint recorded successfully",
+  await audit(req, {
+    action: "credential.mint",
+    scope: "INSTITUTION",
+    institutionId: credential.institutionId,
+    targetType: "Credential",
+    targetId: credential._id,
+    summary: `Minted "${credential.name}" to ${nft.ownerWallet}`,
+    details: { assetAddress: nft.assetAddress, collectionAddress: nft.collectionAddress, charge: nft.charge },
   });
+  res.status(200).json({ success: true, nft: publicNft(nft) });
+});
+
+const publicNft = (nft) => ({
+  assetAddress: nft.assetAddress,
+  collectionAddress: nft.collectionAddress,
+  network: nft.network,
+  ownerWallet: nft.ownerWallet,
+  status: nft.status,
+  mintSignature: nft.mintSignature,
+  mintedAt: nft.mintedAt,
+  revision: nft.revision,
 });
 
 export const getMintedCredentials = asyncHandler(async (req, res) => {

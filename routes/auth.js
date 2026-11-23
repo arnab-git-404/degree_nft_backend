@@ -12,6 +12,8 @@ router.post("/login", authController.login);
 router.post("/login/wallet", authController.walletLogin);
 router.get("/student-invite/:token", authController.getStudentInvite);
 router.post("/student-invite/:token/claim", authController.claimStudentInvite);
+router.get("/recovery/:token", authController.getRecovery);
+router.post("/recovery/:token/prove", authController.proveRecoveryWallet);
 router.get("/me", protect, authController.getMe);
 router.patch("/profile", protect, authController.updateProfile);
 router.patch("/password", protect, authController.changePassword);

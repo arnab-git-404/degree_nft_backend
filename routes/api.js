@@ -7,6 +7,8 @@ import * as collegeRoleController from "../controllers/collegeRoleController.js"
 import * as studentController from "../controllers/studentController.js";
 import * as enrollmentController from "../controllers/enrollmentController.js";
 import * as credentialTypeController from "../controllers/credentialTypeController.js";
+import * as chainController from "../controllers/chainController.js";
+import * as requestController from "../controllers/credentialRequestController.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
 import { protect, requirePermission, requireInstitution } from "../middleware/auth.js";
@@ -38,7 +40,7 @@ router.post("/institution/credentials/:credentialId/revise", protect, requireIns
 router.get("/student/credentials/next/:walletAddress", protect, requirePermission("credential:read"), credentialController.getNextCredential);
 router.get("/student/credentials/minted/:walletAddress", protect, requirePermission("credential:read"), credentialController.getMintedCredentials);
 router.post("/student/credentials/confirm", protect, requirePermission("credential:confirm"), credentialController.confirmCredential);
-router.post("/student/credentials/mint", protect, requirePermission("credential:confirm"), credentialController.recordMint);
+router.post("/student/credentials/claim", protect, requirePermission("credential:confirm"), credentialController.claimCredential);
 router.post("/student/credentials/report", protect, requirePermission("report:create"), credentialController.createReport);
 
 // Institution routes
@@ -56,6 +58,20 @@ router.patch(
   requireInstitution("staff:manage"),
   institutionController.updateStaff
 );
+
+// Credential lifecycle: academic status (one person), wallet recovery and burning (two approvals, two people)
+router.post("/institution/credentials/:credentialId/status", protect, requireInstitution("credential:revoke"), requestController.changeAcademicStatus);
+router.post("/institution/credentials/:credentialId/burn", protect, requireInstitution("credential:burn"), requestController.requestBurn);
+router.post("/institution/students/:studentId/recovery", protect, requireInstitution("credential:recover"), requestController.startRecovery);
+router.get("/institution/credential-requests", protect, requireInstitution(), requestController.listRequests);
+router.post("/institution/credential-requests/:requestId/approve-first", protect, requireInstitution("approval:first"), requestController.approveFirst);
+router.post("/institution/credential-requests/:requestId/approve-final", protect, requireInstitution("approval:final"), requestController.approveFinal);
+router.post("/institution/credential-requests/:requestId/retry", protect, requireInstitution("approval:final"), requestController.retryRequest);
+router.post("/institution/credential-requests/:requestId/reject", protect, requireInstitution(), requestController.rejectRequest);
+
+// Billing: the college's prepaid balance (on-chain payments to the DegreeNFT treasury, charges per minted credential)
+router.get("/institution/billing", protect, requireInstitution("billing:read"), chainController.getCollegeBilling);
+router.post("/institution/billing/sync", protect, requireInstitution("billing:read"), chainController.syncCollegeDeposits);
 
 // Credential types: the college's master list of what it issues
 router.get("/institution/credential-types", protect, requireInstitution("credentialType:read"), credentialTypeController.listCredentialTypes);

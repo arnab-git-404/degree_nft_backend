@@ -19,6 +19,12 @@ const PlatformSettingSchema = new mongoose.Schema(
       lastTestOk: Boolean,
       lastTestError: { type: String, default: "" },
     },
+    // One global price per credential mint, in each currency a college can pay with (base units: lamports, micro-USDC).
+    // Unset = minting is blocked until the Super Admin sets prices.
+    billing: {
+      priceSol: { type: Number, min: 1 },
+      priceUsdc: { type: Number, min: 1 },
+    },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }

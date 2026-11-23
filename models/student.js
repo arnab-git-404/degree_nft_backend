@@ -54,6 +54,18 @@ const StudentSchema = new mongoose.Schema(
     invitedAt: { type: Date },
     inviteExpiresAt: { type: Date },
     claimedAt: { type: Date },
+    // Earlier linked accounts/wallets, kept when a recovery moves the student to a new wallet (never deleted).
+    walletHistory: [
+      {
+        _id: false,
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        wallet: String,
+        linkedAt: Date,
+        unlinkedAt: Date,
+        reason: String,
+        requestId: { type: mongoose.Schema.Types.ObjectId, ref: "CredentialRequest" },
+      },
+    ],
     phone: {
       type: String,
       set: optional,

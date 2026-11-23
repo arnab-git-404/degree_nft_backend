@@ -5,6 +5,7 @@ import User, { SUPER_ADMIN_ACCOUNT } from "../models/user.js";
 import InstitutionMembership from "../models/institutionMembership.js";
 import Wallet from "../models/wallet.js";
 import Student from "../models/student.js";
+import CredentialRequest from "../models/credentialRequest.js";
 import AuthNonce from "../models/authNonce.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
@@ -657,3 +658,73 @@ export const changePassword = asyncHandler(async (req, res) => {
     message: "Password updated successfully",
   });
 });
+
+// ---------------------------------------------------------------- wallet recovery (public, from the emailed link)
+
+const findRecovery = async (token) => {
+  const request = await CredentialRequest.findOne({
+    tokenHash: hashActivationToken(token),
+    tokenExpiresAt: { $gt: new Date() },
+    kind: "RECOVERY",
+    status: "WAITING_FOR_WALLET",
+  })
+    .select("+tokenHash")
+    .populate("institutionId", "name status")
+    .populate("studentId", "fullName registrationNo");
+  if (!request || request.institutionId?.status !== "ACTIVE") {
+    throw new AppError("This recovery link is invalid or has expired. Ask your college to start again.", 400, "INVALID_RECOVERY");
+  }
+  return request;
+};
+
+// Public: what the recovery page shows before the student connects the new wallet.
+export const getRecovery = asyncHandler(async (req, res) => {
+  const request = await findRecovery(req.params.token);
+  res.status(200).json({
+    success: true,
+    recovery: {
+      studentName: request.studentId?.fullName,
+      registrationNo: request.studentId?.registrationNo || null,
+      collegeName: request.institutionId.name,
+      expiresAt: request.tokenExpiresAt,
+    },
+  });
+});
+
+/**
+ * Public: the student signs the challenge with the NEW wallet, proving they hold it. Nothing moves yet:
+ * two college officials still have to approve. The old wallet is not needed (it was lost).
+ */
+export const proveRecoveryWallet = asyncHandler(auditFailures("credential.recovery.prove", "ACCOUNT", (req) => ({ details: { walletAddress: req.body?.walletAddress } }))(async (req, res) => {
+  const { walletAddress, signature, signatureEncoding = "base64" } = req.body;
+  if (!walletAddress || !signature) throw new AppError("walletAddress and signature are required", 400);
+  if (!isValidSolanaAddress(walletAddress)) throw new AppError("Invalid Solana wallet address", 400);
+
+  const request = await findRecovery(req.params.token);
+  await consumeNonce({ walletAddress, signature, signatureEncoding });
+  if (await Wallet.exists({ address: walletAddress, userId: request.fromUserId })) {
+    throw new AppError("That is the wallet being replaced. Connect your new wallet.", 409);
+  }
+  const { user } = await findOrCreateUserByWallet(walletAddress, { name: request.studentId?.fullName, verified: true });
+  if (!user.isActive) throw new AppError("That wallet's account is inactive", 403);
+
+  // Atomic: the link works once.
+  const updated = await CredentialRequest.findOneAndUpdate(
+    { _id: request._id, status: "WAITING_FOR_WALLET", tokenHash: request.tokenHash },
+    { $set: { status: "PENDING_APPROVAL", toWallet: walletAddress, toUserId: user._id, walletProvedAt: new Date() }, $unset: { tokenHash: "", tokenExpiresAt: "" } },
+    { new: true },
+  );
+  if (!updated) throw new AppError("This recovery link has already been used.", 409, "INVALID_RECOVERY");
+
+  await audit(req, {
+    action: "credential.recovery.prove",
+    scope: "INSTITUTION",
+    actor: user,
+    institutionId: request.institutionId._id,
+    targetType: "CredentialRequest",
+    targetId: request._id,
+    summary: `${request.studentId?.fullName} proved new wallet ${walletAddress}`,
+    details: { walletAddress },
+  });
+  res.status(200).json({ success: true, message: "New wallet confirmed. Your college will now approve the move." });
+}));

@@ -11,6 +11,9 @@
         "test": "node --test"
     },
     "dependencies": {
+        "@metaplex-foundation/mpl-core": "^1.10.0",
+        "@metaplex-foundation/umi": "^1.6.0",
+        "@metaplex-foundation/umi-bundle-defaults": "^1.6.0",
         "@solana/web3.js": "^1.78.4",
         "bcryptjs": "^3.0.3",
         "bs58": "^5.0.0",

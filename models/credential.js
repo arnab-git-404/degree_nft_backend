@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 
+export const ACADEMIC_STATUSES = ["ACTIVE", "SUSPENDED", "REVOKED"];
+
 const NftSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -135,6 +137,23 @@ const NftSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  // The official academic validity, checked by public verification. Owning the NFT alone proves nothing.
+  // Changed with a reason; every change is kept in statusHistory (append-only).
+  academicStatus: {
+    type: String,
+    enum: ACADEMIC_STATUSES,
+    default: "ACTIVE",
+  },
+  statusHistory: [
+    {
+      _id: false,
+      status: { type: String, enum: ACADEMIC_STATUSES },
+      reason: String,
+      by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      byName: String,
+      at: Date,
+    },
+  ],
 });
 
 export default mongoose.model("Credential", NftSchema);

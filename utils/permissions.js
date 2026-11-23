@@ -111,6 +111,11 @@ export const PERMISSION_GROUPS = [
         label: "View college activity log",
         description: "See who did what in this college: staff, roles, programs, credentials and Super Admin changes.",
       },
+      {
+        key: "billing:read",
+        label: "View billing",
+        description: "See the college's prepaid balance, payments and charges, and check for new payments.",
+      },
     ],
   },
   {
@@ -132,6 +137,31 @@ export const PERMISSION_GROUPS = [
         key: "credential:confirm",
         label: "Confirm credentials",
         description: "Confirm minted credentials and student claims.",
+      },
+      {
+        key: "credential:revoke",
+        label: "Suspend / revoke credentials",
+        description: "Change a credential's academic status (Active, Suspended, Revoked) with a reason. History is kept.",
+      },
+      {
+        key: "credential:recover",
+        label: "Start wallet recovery",
+        description: "Start moving a student's credentials to a new wallet after the old one was lost. Needs two approvals.",
+      },
+      {
+        key: "credential:burn",
+        label: "Request burning a credential",
+        description: "Ask to destroy a credential on-chain (exceptional, irreversible). Needs two approvals.",
+      },
+      {
+        key: "approval:first",
+        label: "Give first approval",
+        description: "First of the two approvals for wallet recovery and burning.",
+      },
+      {
+        key: "approval:final",
+        label: "Give final approval",
+        description: "Second approval: the action runs on-chain right after it. Must be a different person from the first approver.",
       },
     ],
   },
