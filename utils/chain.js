@@ -1,10 +1,12 @@
 // Everything DegreeNFT does on Solana goes through here: college collections, credential assets, treasury deposits.
 // CHAIN_DRIVER=fake swaps in an in-memory chain for tests (read per call, so tests can set it after import).
 import { randomBytes } from "node:crypto";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionMessage, VersionedTransaction, sendAndConfirmTransaction } from "@solana/web3.js";
+import * as squads from "@sqds/multisig";
+import { toWeb3JsInstruction } from "@metaplex-foundation/umi-web3js-adapters";
 import bs58 from "bs58";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
-import { createSignerFromKeypair, signerIdentity } from "@metaplex-foundation/umi";
+import { createNoopSigner, createSignerFromKeypair, publicKey, signerIdentity } from "@metaplex-foundation/umi";
 import { mplCore, createCollection, create, fetchAsset, fetchCollection, transfer, burn } from "@metaplex-foundation/mpl-core";
 import AppError from "./AppError.js";
 
@@ -55,7 +57,7 @@ const readUmi = () => createUmi(rpcUrl(), "confirmed").use(mplCore());
 export const signingLocked = () => network() === "mainnet" && process.env.MAINNET_KEY_CUSTODY_APPROVED !== "true";
 export const assertSigningAllowed = () => {
   if (signingLocked()) {
-    throw new AppError("Mainnet writes are locked until key custody (KMS/HSM) is set up and MAINNET_KEY_CUSTODY_APPROVED=true", 503);
+    throw new AppError("Mainnet writes are locked until MAINNET_KEY_CUSTODY_APPROVED=true is set on the server", 503);
   }
 };
 
@@ -64,6 +66,15 @@ const umiWithFeePayer = () => {
   const umi = readUmi();
   const payer = createSignerFromKeypair(umi, umi.eddsa.createKeypairFromSecretKey(feePayerSecret()));
   return umi.use(signerIdentity(payer));
+};
+const feePayerKeypair = () => {
+  assertSigningAllowed();
+  return Keypair.fromSecretKey(feePayerSecret());
+};
+// confirmTransaction resolves even when the transaction failed on-chain: check its error too.
+const confirmOk = async (connection, signature) => {
+  const { value } = await connection.confirmTransaction(signature, "confirmed");
+  if (value.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(value.err)}`);
 };
 const signerFrom = (umi, secret) => createSignerFromKeypair(umi, umi.eddsa.createKeypairFromSecretKey(bs58.decode(secret)));
 const confirmed = { confirm: { commitment: "confirmed" } };
@@ -94,21 +105,22 @@ const real = {
     return { address: String(publicKey), lamports: Number((await umi.rpc.getBalance(publicKey)).basisPoints) };
   },
 
-  // The college collection, configured as proven on Devnet (solana-poc/FINDINGS.md): students can't move or burn,
-  // the recovery key can move a frozen asset, only the burn key can burn, the minting key can do neither.
-  async createCollection({ name, uri, keys }) {
+  // The college collection, as proven on Devnet (solana-poc/FINDINGS.md, custody-check.mjs):
+  // frozen forever with NO freeze key; only the college's multisig vault (officials' 2-of-N approvals) can move or
+  // burn a credential; the minting key can only mint and update metadata.
+  async createCollection({ name, uri, mintingAddress, vaultAddress }) {
     const umi = umiWithFeePayer();
     const collection = createSignerFromKeypair(umi, umi.eddsa.generateKeypair());
-    const address = (key) => ({ type: "Address", address: keys[key] });
+    const vault = { type: "Address", address: vaultAddress };
     const { signature } = await createCollection(umi, {
       collection,
       name,
       uri,
-      updateAuthority: keys.minting,
+      updateAuthority: mintingAddress,
       plugins: [
-        { type: "PermanentFreezeDelegate", frozen: true, authority: address("freeze") },
-        { type: "PermanentTransferDelegate", authority: address("recovery") },
-        { type: "PermanentBurnDelegate", authority: address("burn") },
+        { type: "PermanentFreezeDelegate", frozen: true, authority: { type: "None" } },
+        { type: "PermanentTransferDelegate", authority: vault },
+        { type: "PermanentBurnDelegate", authority: vault },
       ],
     }).sendAndConfirm(umi, confirmed);
     return { collectionAddress: String(collection.publicKey), signature: bs58.encode(signature) };
@@ -127,26 +139,136 @@ const real = {
     return { signature: bs58.encode(signature) };
   },
 
-  // Lost wallet: the recovery key moves the (frozen) asset; the old owner does not sign.
-  async transferAsset({ assetAddress, collectionAddress, recoverySecret, newOwner }) {
-    const umi = umiWithFeePayer();
-    const { signature } = await transfer(umi, {
-      asset: await fetchAsset(umi, assetAddress),
-      collection: await fetchCollection(umi, collectionAddress),
-      newOwner,
-      authority: signerFrom(umi, recoverySecret),
-    }).sendAndConfirm(umi, confirmed);
-    return { signature: bs58.encode(signature) };
+  // ---- Squads v4 multisig: the college officials who approve recoveries and burns.
+  // Officials may vote and execute; the platform may only propose and execute (never approve), so it cannot act alone.
+  async createMultisig({ members, threshold }) {
+    const payer = feePayerKeypair();
+    const connection = new Connection(rpcUrl(), "confirmed");
+    const createKey = Keypair.generate();
+    const [multisigPda] = squads.getMultisigPda({ createKey: createKey.publicKey });
+    const [vault] = squads.getVaultPda({ multisigPda, index: 0 });
+    const programConfig = await squads.accounts.ProgramConfig.fromAccountAddress(connection, squads.getProgramConfigPda({})[0]);
+    const { Permission, Permissions } = squads.types;
+    const signature = await squads.rpc.multisigCreateV2({
+      connection,
+      treasury: programConfig.treasury,
+      createKey,
+      creator: payer,
+      multisigPda,
+      configAuthority: null,
+      threshold,
+      members: [
+        { key: payer.publicKey, permissions: Permissions.fromPermissions([Permission.Initiate, Permission.Execute]) },
+        ...members.map((member) => ({ key: new PublicKey(member), permissions: Permissions.fromPermissions([Permission.Vote, Permission.Execute]) })),
+      ],
+      timeLock: 0,
+      rentCollector: null,
+    });
+    await confirmOk(connection, signature);
+    // The vault signs the Core instructions it runs; a little SOL covers any account reallocation.
+    await sendAndConfirmTransaction(connection, new Transaction().add(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: vault, lamports: 5_000_000 })), [payer]);
+    return { multisigAddress: multisigPda.toBase58(), vaultAddress: vault.toBase58(), signature };
   },
 
-  async burnAsset({ assetAddress, collectionAddress, burnSecret }) {
-    const umi = umiWithFeePayer();
-    const { signature } = await burn(umi, {
-      asset: await fetchAsset(umi, assetAddress),
-      collection: await fetchCollection(umi, collectionAddress),
-      authority: signerFrom(umi, burnSecret),
-    }).sendAndConfirm(umi, confirmed);
-    return { signature: bs58.encode(signature) };
+  // Puts the actions (move to a new wallet / burn) in one vault transaction and opens a proposal for the officials.
+  async proposeVaultActions({ multisigAddress, vaultAddress, actions }) {
+    const payer = feePayerKeypair();
+    const connection = new Connection(rpcUrl(), "confirmed");
+    const multisigPda = new PublicKey(multisigAddress);
+    const umi = readUmi();
+    const vault = createNoopSigner(publicKey(vaultAddress));
+    const instructions = [];
+    for (const action of actions) {
+      const asset = await fetchAsset(umi, action.assetAddress);
+      const collection = await fetchCollection(umi, action.collectionAddress);
+      const builder =
+        action.kind === "transfer"
+          ? transfer(umi, { asset, collection, newOwner: publicKey(action.newOwner), authority: vault, payer: vault })
+          : burn(umi, { asset, collection, authority: vault, payer: vault });
+      instructions.push(...builder.getInstructions().map(toWeb3JsInstruction));
+    }
+    const account = await squads.accounts.Multisig.fromAccountAddress(connection, multisigPda);
+    const transactionIndex = BigInt(account.transactionIndex.toString()) + 1n;
+    const { blockhash } = await connection.getLatestBlockhash();
+    await confirmOk(
+      connection,
+      await squads.rpc.vaultTransactionCreate({
+        connection,
+        feePayer: payer,
+        multisigPda,
+        transactionIndex,
+        creator: payer.publicKey,
+        vaultIndex: 0,
+        ephemeralSigners: 0,
+        transactionMessage: new TransactionMessage({ payerKey: new PublicKey(vaultAddress), recentBlockhash: blockhash, instructions }),
+      }),
+    );
+    await confirmOk(connection, await squads.rpc.proposalCreate({ connection, feePayer: payer, multisigPda, transactionIndex, creator: payer }));
+    return { transactionIndex: transactionIndex.toString() };
+  },
+
+  // An approval transaction for one official: the platform pays the fee (signs now), the official signs in their wallet.
+  async buildApprovalTx({ multisigAddress, transactionIndex, member }) {
+    const payer = feePayerKeypair();
+    const connection = new Connection(rpcUrl(), "confirmed");
+    const { blockhash } = await connection.getLatestBlockhash();
+    const transaction = squads.transactions.proposalApprove({
+      blockhash,
+      feePayer: payer.publicKey,
+      multisigPda: new PublicKey(multisigAddress),
+      transactionIndex: BigInt(transactionIndex),
+      member: new PublicKey(member),
+    });
+    transaction.sign([payer]);
+    return Buffer.from(transaction.serialize()).toString("base64");
+  },
+
+  // Sends an official's signed approval, but only if it is exactly the approval we built (nothing added or changed).
+  async submitApprovalTx({ multisigAddress, transactionIndex, member, signedTransaction }) {
+    const payer = feePayerKeypair();
+    const connection = new Connection(rpcUrl(), "confirmed");
+    const transaction = VersionedTransaction.deserialize(Buffer.from(signedTransaction, "base64"));
+    const expected = squads.transactions.proposalApprove({
+      blockhash: transaction.message.recentBlockhash,
+      feePayer: payer.publicKey,
+      multisigPda: new PublicKey(multisigAddress),
+      transactionIndex: BigInt(transactionIndex),
+      member: new PublicKey(member),
+    });
+    if (!Buffer.from(transaction.message.serialize()).equals(Buffer.from(expected.message.serialize()))) {
+      throw new AppError("That is not the approval transaction for this request", 400);
+    }
+    const signature = await connection.sendRawTransaction(transaction.serialize());
+    await confirmOk(connection, signature);
+    return { signature };
+  },
+
+  // { status: "Active" | "Approved" | "Executed" | ..., approved: [addresses] }, or null when there is no proposal.
+  async getProposal({ multisigAddress, transactionIndex }) {
+    const connection = new Connection(rpcUrl(), "confirmed");
+    const [proposalPda] = squads.getProposalPda({ multisigPda: new PublicKey(multisigAddress), transactionIndex: BigInt(transactionIndex) });
+    try {
+      const proposal = await squads.accounts.Proposal.fromAccountAddress(connection, proposalPda);
+      return { status: proposal.status.__kind, approved: proposal.approved.map((key) => key.toBase58()) };
+    } catch (error) {
+      if (/Unable to find|could not find|account.*not.*found/i.test(String(error?.message))) return null;
+      throw error;
+    }
+  },
+
+  // Runs an approved proposal (the platform may execute, never approve).
+  async executeProposal({ multisigAddress, transactionIndex }) {
+    const payer = feePayerKeypair();
+    const connection = new Connection(rpcUrl(), "confirmed");
+    const signature = await squads.rpc.vaultTransactionExecute({
+      connection,
+      feePayer: payer,
+      multisigPda: new PublicKey(multisigAddress),
+      transactionIndex: BigInt(transactionIndex),
+      member: payer.publicKey,
+    });
+    await confirmOk(connection, signature);
+    return { signature };
   },
 
   // null when the asset does not exist (never minted, or burned). An RPC failure throws, so callers never
@@ -234,16 +356,53 @@ export const fakeChain = {
     fakeChain.assets.set(addressOfSecret(assetSecret), { owner: String(owner), collection: collectionAddress });
     return { signature: fakeAddress() };
   },
-  async transferAsset({ assetAddress, newOwner }) {
-    const asset = fakeChain.assets.get(assetAddress);
-    if (!asset) throw new Error("fake: asset not found");
-    asset.owner = String(newOwner);
+  multisigs: new Map(), // address -> { members, threshold, proposals: Map(index -> { actions, approved:Set, status }) }
+  async createMultisig({ members, threshold }) {
+    const multisigAddress = fakeAddress();
+    fakeChain.multisigs.set(multisigAddress, { members, threshold, next: 1, proposals: new Map() });
+    return { multisigAddress, vaultAddress: fakeAddress(), signature: fakeAddress() };
+  },
+  async proposeVaultActions({ multisigAddress, actions }) {
+    const multisig = fakeChain.multisigs.get(multisigAddress);
+    const transactionIndex = String(multisig.next++);
+    multisig.proposals.set(transactionIndex, { actions, approved: new Set(), status: "Active" });
+    return { transactionIndex };
+  },
+  // A fake "transaction" is the JSON of what it approves; the test "signs" it by sending it back.
+  buildApprovalTx: async ({ multisigAddress, transactionIndex, member }) =>
+    Buffer.from(JSON.stringify({ multisigAddress, transactionIndex, member })).toString("base64"),
+  async submitApprovalTx({ multisigAddress, transactionIndex, member, signedTransaction }) {
+    const sent = JSON.parse(Buffer.from(signedTransaction, "base64").toString());
+    if (sent.multisigAddress !== multisigAddress || sent.transactionIndex !== String(transactionIndex) || sent.member !== member) {
+      throw new AppError("That is not the approval transaction for this request", 400);
+    }
+    const multisig = fakeChain.multisigs.get(multisigAddress);
+    const proposal = multisig.proposals.get(String(transactionIndex));
+    if (!multisig.members.includes(member)) throw new Error("fake: not a member");
+    if (proposal.approved.has(member)) throw new Error("fake: AlreadyApproved");
+    proposal.approved.add(member);
+    if (proposal.approved.size >= multisig.threshold) proposal.status = "Approved";
     return { signature: fakeAddress() };
   },
-  async burnAsset({ assetAddress }) {
-    if (!fakeChain.assets.delete(assetAddress)) throw new Error("fake: asset not found");
+  async getProposal({ multisigAddress, transactionIndex }) {
+    const proposal = fakeChain.multisigs.get(multisigAddress)?.proposals.get(String(transactionIndex));
+    return proposal ? { status: proposal.status, approved: [...proposal.approved] } : null;
+  },
+  async executeProposal({ multisigAddress, transactionIndex }) {
+    const proposal = fakeChain.multisigs.get(multisigAddress).proposals.get(String(transactionIndex));
+    if (proposal.status !== "Approved") throw new Error("fake: InvalidProposalStatus");
+    if (fakeChain.failNextExecute) {
+      fakeChain.failNextExecute = false;
+      throw new Error("fake RPC failure");
+    }
+    for (const action of proposal.actions) {
+      if (action.kind === "transfer") fakeChain.assets.get(action.assetAddress).owner = String(action.newOwner);
+      else fakeChain.assets.delete(action.assetAddress);
+    }
+    proposal.status = "Executed";
     return { signature: fakeAddress() };
   },
+  failNextExecute: false,
   rpcDown: false, // tests: the chain is unreachable
   async getAsset(address) {
     if (fakeChain.rpcDown) throw new Error("fake: RPC unreachable");

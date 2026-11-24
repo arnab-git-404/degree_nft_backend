@@ -4,6 +4,9 @@ import { createHash } from "node:crypto";
 import Credential from "../models/credential.js";
 import CredentialType, { ensureCredentialTypes } from "../models/credentialType.js";
 import Enrollment from "../models/enrollment.js";
+import PinnedMetadata from "../models/pinnedMetadata.js";
+import { matchStudentBatchRows } from "./enrollmentController.js";
+import Student from "../models/student.js";
 import Reports from "../models/reports.js";
 import Institution from "../models/institution.js";
 import Wallet from "../models/wallet.js";
@@ -98,22 +101,74 @@ const resolveInstitutionReferences = async (credential) => {
   return { institutionId, institutionWalletId };
 };
 
-export const issueCredential = asyncHandler(async (req, res) => {
-  const {
-    studentWallet,
-    name,
-    symbol,
-    uri,
-    ipfsHash,
-    sellerFeeBasisPoints,
-  } = req.body;
-
-  if (!studentWallet || !name || !symbol || !uri || !ipfsHash) {
-    throw new AppError("Missing required fields for the credential", 400);
+// A credential may only point to metadata DegreeNFT pinned for this college, through a link to that exact file.
+const assertPinnedHere = async (institutionId, uri, ipfsHash) => {
+  const cid = String(ipfsHash || "").trim();
+  if (!String(uri || "").trim().endsWith(`/${cid}`)) throw new AppError("uri must point to the given ipfsHash", 400);
+  if (!(await PinnedMetadata.exists({ institutionId, cid }))) {
+    throw new AppError("The credential details must be uploaded through DegreeNFT first (this metadata was not pinned for your college)", 400);
   }
+};
 
-  if (!isValidSolanaAddress(studentWallet)) {
-    throw new AppError("Invalid student wallet address", 400);
+// The wallet a college student proved through the invite (their linked account's primary wallet).
+export const linkedWalletOf = async (studentId) => {
+  const profile = await Student.findById(studentId).select("userId fullName");
+  if (!profile?.userId) {
+    throw new AppError(`${profile?.fullName || "The student"} has not linked a wallet yet: send them the wallet invite first`, 409);
+  }
+  const wallet = await Wallet.findOne({ userId: profile.userId, chain: "solana" }).sort({ isPrimary: -1, createdAt: 1 });
+  if (!wallet) throw new AppError(`${profile.fullName} has no wallet on their account`, 409);
+  return wallet.address;
+};
+
+// Batch upload: checks every sheet row against the college's own records before anything is issued, and says
+// which enrollment and which (proved) wallet each credential will go to, or why the row can't be issued.
+export const resolveCredentialRows = asyncHandler(async (req, res) => {
+  const rows = req.body?.rows;
+  if (!Array.isArray(rows) || rows.length === 0) throw new AppError("No rows to check", 400);
+  if (rows.length > 200) throw new AppError("Send at most 200 rows at a time", 400);
+  const institutionId = req.institution._id;
+  const results = [];
+  for (const match of await matchStudentBatchRows(institutionId, rows)) {
+    if (match.error) {
+      results.push({ row: match.rowNo, error: match.error });
+      continue;
+    }
+    const { student, program, batch } = match;
+    const enrollment = await Enrollment.findOne({ institutionId, studentId: student._id, programSessionId: batch._id });
+    const batchName = `${program.code} ${batch.startYear}-${batch.endYear}`;
+    let error;
+    if (!enrollment) error = `${student.fullName} is not enrolled in ${batchName}`;
+    else if (enrollment.status === "CANCELLED") error = `${student.fullName}'s enrollment in ${batchName} is cancelled`;
+    let wallet;
+    if (!error) {
+      try {
+        wallet = await linkedWalletOf(student._id);
+      } catch (walletError) {
+        error = walletError.message;
+      }
+    }
+    results.push({
+      row: match.rowNo,
+      ...(error && { error }),
+      enrollmentId: enrollment._id,
+      studentName: student.fullName,
+      registrationNo: student.registrationNo,
+      programCode: program.code,
+      programName: program.name,
+      startYear: batch.startYear,
+      endYear: batch.endYear,
+      wallet,
+    });
+  }
+  res.status(200).json({ success: true, results });
+});
+
+export const issueCredential = asyncHandler(async (req, res) => {
+  const { name, symbol, uri, ipfsHash, sellerFeeBasisPoints } = req.body;
+
+  if (!name || !symbol || !uri || !ipfsHash) {
+    throw new AppError("Missing required fields for the credential", 400);
   }
 
   // Verified by requireInstitution: the caller's active membership, never a body field.
@@ -126,25 +181,21 @@ export const issueCredential = asyncHandler(async (req, res) => {
     );
   }
 
-  // P06-02: an enrollment may be named (P06-04 makes the UI send it, then it becomes required).
-  // The enrollment is looked up inside the caller's own college, so a foreign id is just "not found".
+  // Every credential belongs to one enrollment, looked up inside the caller's own college (a foreign id is "not found").
   // The type must be an Active entry of the college's own master list (Credential types page).
   await ensureCredentialTypes(institution._id);
   const credentialType = String(req.body.credentialType || "DEGREE").toUpperCase();
   if (!(await CredentialType.exists({ institutionId: institution._id, code: credentialType, status: "ACTIVE" }))) {
     throw new AppError(`"${credentialType}" is not an active credential type of this college`, 400);
   }
-  let enrollment = null;
-  if (req.body.enrollmentId) {
-    if (!mongoose.isValidObjectId(req.body.enrollmentId)) {
-      throw new AppError("Invalid enrollmentId", 400);
-    }
-    enrollment = await Enrollment.findOne({ _id: req.body.enrollmentId, institutionId: institution._id });
-    if (!enrollment) throw new AppError("Enrollment not found at this institution", 404);
-    if (enrollment.status === "CANCELLED") {
-      throw new AppError("Cannot issue a credential for a cancelled enrollment", 409);
-    }
-  }
+  if (!req.body.enrollmentId) throw new AppError("Choose the student's enrollment", 400);
+  if (!mongoose.isValidObjectId(req.body.enrollmentId)) throw new AppError("Invalid enrollmentId", 400);
+  const enrollment = await Enrollment.findOne({ _id: req.body.enrollmentId, institutionId: institution._id });
+  if (!enrollment) throw new AppError("Enrollment not found at this institution", 404);
+  if (enrollment.status === "CANCELLED") throw new AppError("Cannot issue a credential for a cancelled enrollment", 409);
+  await assertPinnedHere(institution._id, uri, ipfsHash);
+  // Only to the wallet the student proved (invite claim), never a typed one.
+  const studentWallet = await linkedWalletOf(enrollment.studentId);
 
   const existingCredential = await Credential.findOne({
     ipfsHash,
@@ -185,9 +236,9 @@ export const issueCredential = asyncHandler(async (req, res) => {
     institutionId: institution._id,
     userId: student._id,
     credentialType,
-    contentHash: contentHashOf({ enrollmentId: enrollment?._id, credentialType, name, ipfsHash }),
-    enrollmentId: enrollment?._id,
-    studentId: enrollment?.studentId,
+    contentHash: contentHashOf({ enrollmentId: enrollment._id, credentialType, name, ipfsHash }),
+    enrollmentId: enrollment._id,
+    studentId: enrollment.studentId,
     institutionWalletId: institutionWallet?._id,
     studentWalletId: studentWalletDocument._id,
     sellerFeeBasisPoints,
@@ -227,58 +278,44 @@ export const issueCredential = asyncHandler(async (req, res) => {
   });
 });
 
+// Every credential waiting for this student (not minted yet), oldest first, each with what the review screen needs.
 export const getNextCredential = asyncHandler(async (req, res) => {
   const { walletAddress } = req.params;
   const wallet = await getStudentWallet(req.user, walletAddress);
 
-  const pendingCredential = await Credential.findOne({
-    allocated: true,
-    minted: false,
-    ...walletFilter(wallet),
-  })
+  const pending = await Credential.find({ allocated: true, minted: false, ...walletFilter(wallet) })
     .sort({ allocatedAt: 1 })
-    .populate("institutionId", "name code walletAddress");
+    .populate("institutionId", "name code");
 
-  const existingReport = await Reports.findOne(walletFilter(wallet));
-
-  if (pendingCredential) {
-    res.status(200).json({
-      authorized: true,
-      existingReport: Boolean(await Reports.exists(openReportsOf(pendingCredential))),
-      nftInfo: {
-        _id: pendingCredential._id,
-        name: pendingCredential.name,
-        symbol: pendingCredential.symbol,
-        uri: pendingCredential.uri,
-        ipfsHash: pendingCredential.ipfsHash,
-        confirmationStatus: pendingCredential.status,
-        revision: pendingCredential.revision,
-        revisionNote: pendingCredential.previousRevisions.at(-1)?.reason || null,
-        credentialType: pendingCredential.credentialType,
-        sellerFeeBasisPoints: pendingCredential.sellerFeeBasisPoints,
-        institutionName: pendingCredential.institutionId?.name || null,
-      },
-      confirmationDeadline: pendingCredential.confirmationDeadline,
-    });
-    return;
-  }
-
-  const anyCredential = await Credential.findOne(walletFilter(wallet));
-
-  if (anyCredential) {
-    res.status(200).json({
-      authorized: false,
-      existingReport: Boolean(existingReport),
-      message:
-        "All credentials have already been minted for this wallet, or none are ready for minting.",
-    });
+  if (pending.length) {
+    const credentials = await Promise.all(
+      pending.map(async (credential) => ({
+        _id: credential._id,
+        name: credential.name,
+        symbol: credential.symbol,
+        uri: credential.uri,
+        ipfsHash: credential.ipfsHash,
+        confirmationStatus: credential.status,
+        isConfirmed: credential.isConfirmed,
+        confirmationDeadline: credential.confirmationDeadline,
+        revision: credential.revision,
+        revisionNote: credential.previousRevisions.at(-1)?.reason || null,
+        credentialType: credential.credentialType,
+        academicStatus: credential.academicStatus || "ACTIVE",
+        institutionName: credential.institutionId?.name || null,
+        existingReport: Boolean(await Reports.exists(openReportsOf(credential))),
+      })),
+    );
+    res.status(200).json({ authorized: true, credentials });
     return;
   }
 
   res.status(200).json({
     authorized: false,
-    existingReport: Boolean(existingReport),
-    message: "No credential found for this wallet.",
+    credentials: [],
+    message: (await Credential.exists(walletFilter(wallet)))
+      ? "All your credentials are already in your wallet. New ones appear here when your college issues them."
+      : "No credential found for this wallet.",
   });
 });
 
@@ -310,7 +347,7 @@ export const reviseCredential = asyncHandler(async (req, res) => {
     if (typeof value !== "string" || !value.trim()) throw new AppError(`${label} is required`, 400);
   }
   // The pinned metadata and its public link must be the same file.
-  if (!uri.trim().endsWith(`/${ipfsHash.trim()}`)) throw new AppError("uri must point to the given ipfsHash", 400);
+  await assertPinnedHere(credential.institutionId, uri, ipfsHash);
   if (await Credential.exists({ _id: { $ne: credential._id }, ipfsHash: ipfsHash.trim(), studentWallet: credential.studentWallet, institutionId: credential.institutionId })) {
     throw new AppError("This credential has already been issued for this combination", 409);
   }
@@ -440,6 +477,7 @@ export const pinMetadata = asyncHandler(async (req, res) => {
     throw new AppError("IPFS pinning is not configured on the server", 503);
   }
 
+  const json = JSON.stringify(metadata);
   const response = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
     method: "POST",
     headers: {
@@ -447,7 +485,7 @@ export const pinMetadata = asyncHandler(async (req, res) => {
       pinata_api_key: process.env.PINATA_API_KEY,
       pinata_secret_api_key: process.env.PINATA_API_SECRET,
     },
-    body: JSON.stringify(metadata),
+    body: json,
   });
 
   if (!response.ok) {
@@ -456,6 +494,11 @@ export const pinMetadata = asyncHandler(async (req, res) => {
   }
 
   const { IpfsHash } = await response.json();
+  await PinnedMetadata.updateOne(
+    { institutionId: req.institution._id, cid: IpfsHash },
+    { $setOnInsert: { sha256: createHash("sha256").update(json).digest("hex"), pinnedBy: req.user._id } },
+    { upsert: true },
+  );
   await audit(req, { action: "credential.metadata.pin", scope: "INSTITUTION", targetType: "IPFS", targetId: IpfsHash, summary: `Pinned metadata for "${metadata.name}"` });
   res.status(200).json({ success: true, IpfsHash });
 });

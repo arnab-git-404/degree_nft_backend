@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import mongoose from "mongoose";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, VersionedTransaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
 import { createSignerFromKeypair, signerIdentity } from "@metaplex-foundation/umi";
 import { mplCore, fetchAsset, fetchCollection, transfer, burn } from "@metaplex-foundation/mpl-core";
@@ -108,20 +108,39 @@ describe("Devnet end-to-end through the API (Phase 4)", { skip: !enabled && "set
 
     // 1. Price, and the college's collection created by the Super Admin (real transaction).
     assert.equal((await call("PUT", "/admin/settings/billing", { token: admin.token, body: { priceSol: "0.001", priceUsdc: "1" } })).status, 200);
-    const setup = await call("POST", `/admin/institutions/${college._id}/chain`, { token: admin.token });
+    // Three college officials (we hold their keys here, as their wallet apps would); any 2 must approve.
+    const officials = [Keypair.generate(), Keypair.generate(), Keypair.generate()];
+    const setup = await call("POST", `/admin/institutions/${college._id}/chain`, {
+      token: admin.token,
+      body: { members: officials.map((official) => official.publicKey.toBase58()), threshold: 2 },
+    });
     assert.equal(setup.status, 201, JSON.stringify(setup.body));
-    const { collectionAddress, setupSignature, keys } = setup.body.chain;
+    const { collectionAddress, setupSignature, mintingAddress, multisig } = setup.body.chain;
     record("collection created", { collectionAddress, signature: setupSignature });
 
-    // The permanent rules are really on the collection, with the right keys.
+    // The permanent rules are really on the collection: no freeze key, the officials' vault moves and burns.
     const umi = createUmi(rpc, "confirmed").use(mplCore());
     const collection = await fetchCollection(umi, collectionAddress);
-    assert.equal(String(collection.updateAuthority), keys.minting);
+    assert.equal(String(collection.updateAuthority), mintingAddress);
     assert.equal(collection.permanentFreezeDelegate?.frozen, true);
-    assert.equal(String(collection.permanentFreezeDelegate?.authority.address), keys.freeze);
-    assert.equal(String(collection.permanentTransferDelegate?.authority.address), keys.recovery);
-    assert.equal(String(collection.permanentBurnDelegate?.authority.address), keys.burn);
-    record("permanent plugins checked", { freeze: true, recoveryKey: keys.recovery, burnKey: keys.burn });
+    assert.equal(collection.permanentFreezeDelegate?.authority.type, "None");
+    assert.equal(String(collection.permanentTransferDelegate?.authority.address), multisig.vault);
+    assert.equal(String(collection.permanentBurnDelegate?.authority.address), multisig.vault);
+    record("permanent plugins checked", { freezeAuthority: "None", recoveryAndBurnAuthority: multisig.vault, multisig: multisig.address });
+
+    // An official approves: the app builds the approval, the official's wallet signs it, the app sends it.
+    const approveWith = async (user, requestId, official, extra = {}) => {
+      const query = new URLSearchParams({ wallet: official.publicKey.toBase58(), ...extra }).toString();
+      const built = await as(user)("GET", `/institution/credential-requests/${requestId}/approval-tx?${query}`);
+      if (built.status !== 200) return built;
+      const transaction = VersionedTransaction.deserialize(Buffer.from(built.body.transaction, "base64"));
+      transaction.sign([official]);
+      return as(user)("POST", `/institution/credential-requests/${requestId}/approval-tx`, {
+        wallet: official.publicKey.toBase58(),
+        signedTransaction: Buffer.from(transaction.serialize()).toString("base64"),
+        ...extra,
+      });
+    };
 
     // 2. The college pays the treasury from its own wallet; the app credits it once.
     await sendSol(feePayer, college.walletAddress, 0.01);
@@ -168,9 +187,11 @@ describe("Devnet end-to-end through the API (Phase 4)", { skip: !enabled && "set
     created.users.push(newWalletDoc.userId);
     created.wallets.push(newWalletDoc._id);
     const requestId = started.body.request._id;
-    assert.equal((await as(head)("POST", `/institution/credential-requests/${requestId}/approve-first`)).status, 200);
-    assert.equal((await as(head)("POST", `/institution/credential-requests/${requestId}/approve-final`)).status, 403);
-    const recovered = await as(second)("POST", `/institution/credential-requests/${requestId}/approve-final`);
+    const one = await approveWith(head, requestId, officials[0]);
+    assert.equal(one.status, 200, JSON.stringify(one.body));
+    assert.equal(one.body.request.status, "PENDING_APPROVAL"); // one official is not enough
+    assert.equal((await approveWith(head, requestId, officials[0])).status, 409); // nor the same one twice
+    const recovered = await approveWith(second, requestId, officials[1]);
     assert.equal(recovered.body.request?.status, "EXECUTED", JSON.stringify(recovered.body));
     asset = await fetchAsset(umi, assetAddress);
     assert.equal(String(asset.owner), newKey.publicKey.toBase58()); // same asset address, new owner
@@ -186,8 +207,8 @@ describe("Devnet end-to-end through the API (Phase 4)", { skip: !enabled && "set
     // 7. Exceptional burn: two approvals and explicit confirmation; the asset is gone on-chain.
     const burnRequest = await as(head)("POST", `/institution/credentials/${credentialId}/burn`, { reason: "E2E burn" });
     assert.equal(burnRequest.status, 201, JSON.stringify(burnRequest.body));
-    await as(head)("POST", `/institution/credential-requests/${burnRequest.body.request._id}/approve-first`);
-    const burned = await as(second)("POST", `/institution/credential-requests/${burnRequest.body.request._id}/approve-final`, { confirmIrreversible: true });
+    await approveWith(head, burnRequest.body.request._id, officials[1], { confirmIrreversible: "true" });
+    const burned = await approveWith(second, burnRequest.body.request._id, officials[2], { confirmIrreversible: "true" });
     assert.equal(burned.body.request?.status, "EXECUTED", JSON.stringify(burned.body));
     await assert.rejects(fetchAsset(umi, assetAddress));
     assert.equal((await call("GET", `/verify/${assetAddress}`)).body.status, "REVOKED");

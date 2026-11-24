@@ -39,13 +39,41 @@ import CredentialRequest from "../models/credentialRequest.js";
 import { fakeChain, addressOfSecret } from "../utils/chain.js";
 import { pickPayment } from "../services/billingService.js";
 import { toUnits } from "../controllers/chainController.js";
+import PinnedMetadata from "../models/pinnedMetadata.js";
+import { findOrCreateUserByWallet } from "../services/userWalletService.js";
 
 describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not set" }, () => {
   let server;
   let base;
   const created = { users: [], wallets: [], unis: [], roles: [] };
 
-  const call = async (method, path, { token, body, institution } = {}) => {
+  // Issuing needs (1) metadata pinned through DegreeNFT for the college and (2) an enrollment of a student who linked
+  // the wallet. Tests that are about something else get both prepared here, the way a real college would have them;
+  // tests about those two rules pass raw: true.
+  const prepareIssue = async (institution, path, body) => {
+    const institutionId = String(institution._id || institution);
+    await PinnedMetadata.updateOne({ institutionId, cid: body.ipfsHash }, { $setOnInsert: { sha256: "test" } }, { upsert: true });
+    if (path !== "/institution/credentials" || body.enrollmentId || !body.studentWallet) return body;
+    const { user, wallet } = await findOrCreateUserByWallet(body.studentWallet);
+    created.users.push(user._id);
+    created.wallets.push(wallet._id);
+    const profile =
+      (await Student.findOne({ institutionId, userId: user._id })) ||
+      (await Student.create({ institutionId, userId: user._id, fullName: "Smoke Student", email: `smoke-${wallet._id}@example.com` }));
+    const program = (await Program.findOne({ institutionId, code: "SMK" })) || (await Program.create({ institutionId, code: "SMK", name: "Smoke Program" }));
+    const batch =
+      (await ProgramSession.findOne({ institutionId, programId: program._id })) ||
+      (await ProgramSession.create({ institutionId, programId: program._id, startYear: 2020, endYear: 2024, code: "SMK-2020" }));
+    const enrollment =
+      (await Enrollment.findOne({ institutionId, studentId: profile._id, programSessionId: batch._id })) ||
+      (await Enrollment.create({ institutionId, studentId: profile._id, programSessionId: batch._id, programId: program._id }));
+    return { ...body, enrollmentId: String(enrollment._id) };
+  };
+
+  const call = async (method, path, { token, body, institution, raw } = {}) => {
+    if (!raw && method === "POST" && institution && body?.ipfsHash && (path === "/institution/credentials" || path.endsWith("/revise"))) {
+      body = await prepareIssue(institution, path, body);
+    }
     const response = await fetch(base + path, {
       method,
       headers: {
@@ -89,6 +117,10 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     return institution;
   };
 
+  // A college's approving officials (their wallets): any 2 of 3 must approve recoveries and burns.
+  const officials = () => [Keypair.generate(), Keypair.generate(), Keypair.generate()].map((keypair) => keypair.publicKey.toBase58());
+  const chainBody = (members = officials()) => ({ members, threshold: 2 });
+
   const allocation = (studentWallet) => ({
     studentWallet,
     name: "Smoke Degree",
@@ -123,6 +155,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     await BillingEntry.deleteMany({ institutionId: { $in: created.unis } });
     await Nft.deleteMany({ institutionId: { $in: created.unis } });
     await CredentialRequest.deleteMany({ institutionId: { $in: created.unis } });
+    await PinnedMetadata.deleteMany({ institutionId: { $in: created.unis } });
     await Institution.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
@@ -1544,6 +1577,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const rahul = (await as("POST", "/institution/students", { fullName: "Rahul", email: "rahul@example.com" })).body.student;
       const enrollment = (await as("POST", "/institution/enrollments", { studentId: rahul._id, programSessionId: batch._id })).body.enrollment;
       const student = await makeUser("student");
+      await Student.updateOne({ _id: rahul._id }, { userId: student.user._id }); // the student has linked their wallet
       const issue = (credentialType, ipfsHash) => as("POST", "/institution/credentials", { ...allocation(student.wallet.address), ipfsHash, enrollmentId: enrollment._id, credentialType });
       assert.equal((await issue("DEGREE", "QmDeg")).status, 201);
       assert.equal((await issue("provisional", "QmProv")).status, 201);
@@ -1749,7 +1783,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
         assert.equal(notSetUp.status, 409);
         assert.match(notSetUp.body.message, /not set up/);
 
-        assert.equal((await call("POST", `/admin/institutions/${institution._id}/chain`, { token: admin.token })).status, 201);
+        assert.equal((await call("POST", `/admin/institutions/${institution._id}/chain`, { token: admin.token, body: chainBody() })).status, 201);
         const broke = await claim(degree);
         assert.equal(broke.status, 409);
         assert.match(broke.body.message, /balance is too low/);
@@ -1934,28 +1968,31 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal(read.body.prices.USDC, 2_000_000);
     });
 
-    test("the Super Admin creates a college collection once; the keys are stored encrypted and match their addresses", async () => {
+    test("the Super Admin creates a college collection once, with the officials' multisig; only the minting key is held, encrypted", async () => {
       const admin = await makeUser("admin");
       const head = await makeUser("institution");
       const college = await makeInstitution(head, "VERIFIED");
       const pending = await makeInstitution(await makeUser("institution"), "PENDING");
-      const setup = (institution, token = admin.token) => call("POST", `/admin/institutions/${institution._id}/chain`, { token });
+      const setup = (institution, body = chainBody(), token = admin.token) => call("POST", `/admin/institutions/${institution._id}/chain`, { token, body });
 
-      assert.equal((await setup(college, head.token)).status, 403);
+      assert.equal((await setup(college, chainBody(), head.token)).status, 403);
+      assert.equal((await setup(college, { members: officials().slice(0, 1) })).status, 400); // one official is not a multisig
+      assert.equal((await setup(college, { members: officials(), threshold: 1 })).status, 400); // one approval is not enough
+      assert.equal((await setup(college, { members: officials(), threshold: 4 })).status, 400); // more than the officials
+      assert.equal((await setup(college, { members: ["not-a-wallet", ...officials()] })).status, 400);
       assert.equal((await setup(pending)).status, 409); // not verified yet
-      const first = await setup(college);
+      const members = officials();
+      const first = await setup(college, { members, threshold: 2 });
       assert.equal(first.status, 201, JSON.stringify(first.body));
-      assert.ok(first.body.chain.collectionAddress);
-      assert.deepEqual(Object.keys(first.body.chain.keys).sort(), ["burn", "freeze", "minting", "recovery"]);
+      assert.ok(first.body.chain.collectionAddress && first.body.chain.mintingAddress);
+      assert.deepEqual(first.body.chain.multisig.members, members);
+      assert.equal(first.body.chain.multisig.threshold, 2);
+      assert.ok(first.body.chain.multisig.vault);
       assert.ok(!JSON.stringify(first.body).includes("secret")); // no secret ever leaves the server
       assert.equal((await setup(college)).status, 409); // once only: the permissions are fixed
 
-      const stored = await CollegeChain.findOne({ institutionId: college._id }).select("+keys.minting.secretEncrypted +keys.freeze.secretEncrypted +keys.recovery.secretEncrypted +keys.burn.secretEncrypted");
-      for (const role of ["minting", "freeze", "recovery", "burn"]) {
-        assert.equal(addressOfSecret(decryptSecret(stored.keys[role].secretEncrypted)), stored.keys[role].address, role);
-      }
-      const addresses = Object.values(first.body.chain.keys);
-      assert.equal(new Set(addresses).size, 4); // four different keys
+      const stored = await CollegeChain.findOne({ institutionId: college._id }).select("+keys.minting.secretEncrypted");
+      assert.equal(addressOfSecret(decryptSecret(stored.keys.minting.secretEncrypted)), stored.keys.minting.address);
     });
 
     test("a college's on-chain payments become its balance, once each, and only from its own wallet", async () => {
@@ -2001,7 +2038,8 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const admin = await makeUser("admin");
       const head = await makeUser("institution");
       const college = await makeInstitution(head, "VERIFIED");
-      await call("POST", `/admin/institutions/${college._id}/chain`, { token: admin.token });
+      const approvers = officials();
+      await call("POST", `/admin/institutions/${college._id}/chain`, { token: admin.token, body: chainBody(approvers) });
       fakeChain.deposits.push({ signature: `life-${college._id}`, currency: "SOL", amount: 1000, from: college.walletAddress });
       await call("POST", "/institution/billing/sync", { token: head.token, institution: college });
       const member = async (roleName) => {
@@ -2029,7 +2067,14 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const claim = (credential, token = student.token, walletAddress = oldWallet) =>
         call("POST", "/student/credentials/claim", { token, body: { walletAddress, credentialId: String(credential._id), revision: credential.revision } });
       const as = (user) => (method, path, body) => call(method, path, { token: user.token, institution: college, body });
-      return { admin, head, college, secondAdmin, staff, student, oldKey, oldWallet, profile, issue, claim, as };
+      // An official approves: get the transaction for their wallet, "sign" it (the fake chain takes it back as is), send it.
+      const approveWith = async (user, requestId, wallet, extra = {}) => {
+        const query = new URLSearchParams({ wallet, ...extra }).toString();
+        const built = await as(user)("GET", `/institution/credential-requests/${requestId}/approval-tx?${query}`);
+        if (built.status !== 200) return built;
+        return as(user)("POST", `/institution/credential-requests/${requestId}/approval-tx`, { wallet, signedTransaction: built.body.transaction, ...extra });
+      };
+      return { admin, head, college, secondAdmin, staff, student, oldKey, oldWallet, profile, issue, claim, as, approvers, approveWith };
     };
 
     const sign = async (keypair) => {
@@ -2071,7 +2116,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const token = started.body.recoveryUrl.split("/recover/")[1];
 
       // Nothing can be approved before the student proves the new wallet.
-      assert.equal((await w.as(w.head)("POST", `/institution/credential-requests/${requestId}/approve-first`)).status, 409);
+      assert.equal((await w.approveWith(w.head, requestId, w.approvers[0])).status, 409);
 
       assert.equal((await call("GET", `/auth/recovery/${token}`)).body.recovery.studentName, "Rahul");
       assert.equal((await call("POST", `/auth/recovery/${token}/prove`, { body: await sign(w.oldKey) })).status, 409); // the wallet being replaced
@@ -2084,15 +2129,21 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       created.users.push(newWalletDoc.userId);
       created.wallets.push(newWalletDoc._id);
 
-      const approve = (user, stage, body) => w.as(user)("POST", `/institution/credential-requests/${requestId}/approve-${stage}`, body);
-      assert.equal((await approve(w.head, "final")).status, 409); // first comes first
-      assert.equal((await approve(w.staff, "first")).status, 403); // no approval permission
-      assert.equal((await approve(w.head, "first")).status, 200);
-      assert.equal((await approve(w.head, "first")).status, 409);
-      assert.equal((await approve(w.head, "final")).status, 403); // the same person cannot give both
+      assert.equal((await w.approveWith(w.staff, requestId, w.approvers[0])).status, 403); // no approval permission in the app
+      assert.equal((await w.approveWith(w.head, requestId, Keypair.generate().publicKey.toBase58())).status, 403); // not an official's wallet
+      // A signed transaction must be exactly the one built for that wallet: swapping the member is refused.
+      const built = await w.as(w.head)("GET", `/institution/credential-requests/${requestId}/approval-tx?wallet=${w.approvers[2]}`);
+      const forged = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(built.body.transaction, "base64").toString()), member: w.approvers[1] })).toString("base64");
+      assert.equal((await w.as(w.head)("POST", `/institution/credential-requests/${requestId}/approval-tx`, { wallet: w.approvers[2], signedTransaction: forged })).status, 400);
+
+      const first = await w.approveWith(w.head, requestId, w.approvers[0]);
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(first.body.request.status, "PENDING_APPROVAL"); // 1 of 2: nothing happens yet
+      assert.equal((await w.approveWith(w.head, requestId, w.approvers[0])).status, 409); // the same official twice
       assert.equal(fakeChain.assets.get(assetAddress).owner, w.oldWallet); // nothing moved yet
-      const done = await approve(w.secondAdmin, "final");
+      const done = await w.approveWith(w.secondAdmin, requestId, w.approvers[1]);
       assert.equal(done.status, 200, JSON.stringify(done.body));
+      assert.equal(done.body.request.walletApprovals.length, 2);
       assert.equal(done.body.request.status, "EXECUTED");
 
       // On-chain and in our records: same asset, new owner, history kept.
@@ -2126,11 +2177,15 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal(requested.status, 201, JSON.stringify(requested.body));
       assert.equal((await w.as(w.head)("POST", `/institution/credentials/${credential._id}/burn`, { reason: "Again" })).status, 409);
       const requestId = requested.body.request._id;
-      const approve = (user, stage, body) => w.as(user)("POST", `/institution/credential-requests/${requestId}/approve-${stage}`, body);
-      assert.equal((await approve(w.head, "first")).status, 200);
-      assert.equal((await approve(w.secondAdmin, "final")).status, 400); // must confirm it is irreversible
+      assert.equal((await w.approveWith(w.head, requestId, w.approvers[0])).status, 400); // must confirm it is irreversible
+      assert.equal((await w.approveWith(w.head, requestId, w.approvers[0], { confirmIrreversible: "true" })).status, 200);
       assert.ok(fakeChain.assets.has(assetAddress));
-      const done = await approve(w.secondAdmin, "final", { confirmIrreversible: true });
+      // The chain step fails after the second approval: nothing is lost, the request can be retried.
+      fakeChain.failNextExecute = true;
+      const failed = await w.approveWith(w.secondAdmin, requestId, w.approvers[1], { confirmIrreversible: "true" });
+      assert.equal(failed.body.request.status, "FAILED", JSON.stringify(failed.body));
+      assert.ok(fakeChain.assets.has(assetAddress));
+      const done = await w.as(w.secondAdmin)("POST", `/institution/credential-requests/${requestId}/retry`);
       assert.equal(done.status, 200, JSON.stringify(done.body));
       assert.equal(done.body.request.status, "EXECUTED");
       assert.equal(fakeChain.assets.has(assetAddress), false);
@@ -2194,11 +2249,12 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       try {
         const address = Keypair.generate().publicKey.toBase58();
         let limited;
-        for (let i = 0; i < 70 && !limited; i++) {
+        // 130 > 2 x 60: at least one full minute-window overflows even if the run crosses a window boundary.
+        for (let i = 0; i < 130 && !limited; i++) {
           const response = await fetch(`${base}/verify/${address}`);
           if (response.status === 429) limited = response;
         }
-        assert.ok(limited, "no 429 after 70 requests");
+        assert.ok(limited, "no 429 after 130 requests");
         assert.ok(Number(limited.headers.get("retry-after")) > 0);
       } finally {
         process.env.RATE_LIMIT_DISABLED = "true";
@@ -2212,7 +2268,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const cluster = process.env.SOLANA_CLUSTER;
       process.env.SOLANA_CLUSTER = "mainnet";
       try {
-        assert.equal((await call("POST", `/admin/institutions/${other._id}/chain`, { token: w.admin.token })).status, 503);
+        assert.equal((await call("POST", `/admin/institutions/${other._id}/chain`, { token: w.admin.token, body: chainBody() })).status, 503);
         const wrongNetwork = await w.claim(credential); // the college collection was made on devnet
         assert.equal(wrongNetwork.status, 409);
         assert.match(wrongNetwork.body.message, /devnet/);
@@ -2276,13 +2332,102 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const outsider = await makeUser("institution");
       const elsewhere = await makeInstitution(outsider, "VERIFIED");
       const foreign = (path) => call("POST", `/institution/credential-requests/${requestId}/${path}`, { token: outsider.token, institution: elsewhere, body: { confirmIrreversible: true } });
-      assert.equal((await foreign("approve-first")).status, 404);
+      assert.equal((await foreign("approval-tx")).status, 404);
       assert.equal((await call("GET", "/institution/credential-requests", { token: outsider.token, institution: elsewhere })).body.requests.length, 0);
 
-      await w.as(w.head)("POST", `/institution/credential-requests/${requestId}/approve-first`);
-      await w.as(w.secondAdmin)("POST", `/institution/credential-requests/${requestId}/approve-final`, { confirmIrreversible: true });
+      await w.approveWith(w.head, requestId, w.approvers[0], { confirmIrreversible: "true" });
+      await w.approveWith(w.secondAdmin, requestId, w.approvers[2], { confirmIrreversible: "true" });
       assert.equal(fakeChain.assets.has(goneAsset), false);
       assert.ok(fakeChain.assets.has(keepAsset)); // only the intended asset was burned
+    });
+
+    test("batch upload: rows are matched to enrollments, and credentials go only to the student's proved wallet", async () => {
+      const head = await makeUser("institution");
+      const college = await makeInstitution(head, "VERIFIED");
+      const as = (method, path, body) => call(method, path, { token: head.token, institution: college, body });
+      const program = (await as("POST", "/institution/programs", { code: "CSE", name: "Computer Science" })).body.program;
+      const batch = (await as("POST", "/institution/program-sessions", { programId: program._id, startYear: 2022, endYear: 2026 })).body.session;
+      const linkedUser = await makeUser("student");
+      const linked = await Student.create({ institutionId: college._id, fullName: "Asha Linked", registrationNo: "B-1", email: `b1-${college._id}@example.com`, userId: linkedUser.user._id });
+      const unlinked = await Student.create({ institutionId: college._id, fullName: "Ravi Unlinked", registrationNo: "B-2", email: `b2-${college._id}@example.com` });
+      await Student.create({ institutionId: college._id, fullName: "Not Enrolled", registrationNo: "B-3", email: `b3-${college._id}@example.com` });
+      const enroll = (student) => Enrollment.create({ institutionId: college._id, studentId: student._id, programSessionId: batch._id, programId: program._id });
+      const linkedEnrollment = await enroll(linked);
+      const unlinkedEnrollment = await enroll(unlinked);
+
+      const resolved = await as("POST", "/institution/credentials/resolve", {
+        rows: [
+          { row: 2, registrationNo: "b-1", programCode: "cse", startYear: "2022" },
+          { row: 3, registrationNo: "B-2", programCode: "CSE", startYear: "2022" },
+          { row: 4, registrationNo: "B-3", programCode: "CSE", startYear: "2022" },
+          { row: 5, registrationNo: "B-404", programCode: "CSE", startYear: "2022" },
+        ],
+      });
+      assert.equal(resolved.status, 200, JSON.stringify(resolved.body));
+      const [ok, notLinked, notEnrolled, unknown] = resolved.body.results;
+      assert.equal(ok.error, undefined);
+      assert.equal(ok.enrollmentId, String(linkedEnrollment._id));
+      assert.equal(ok.wallet, linkedUser.wallet.address);
+      assert.equal(ok.programName, "Computer Science");
+      assert.match(notLinked.error, /not linked a wallet/);
+      assert.match(notEnrolled.error, /not enrolled/);
+      assert.match(unknown.error, /No student/);
+
+      // A typed wallet is ignored for an enrollment: the credential goes to the proved wallet.
+      const typed = Keypair.generate().publicKey.toBase58();
+      const issued = await as("POST", "/institution/credentials", { ...allocation(typed), ipfsHash: "QmBatch1", enrollmentId: String(linkedEnrollment._id) });
+      assert.equal(issued.status, 201, JSON.stringify(issued.body));
+      assert.equal(issued.body.credential.studentWallet, linkedUser.wallet.address);
+      const refused = await as("POST", "/institution/credentials", { ...allocation(typed), ipfsHash: "QmBatch2", enrollmentId: String(unlinkedEnrollment._id) });
+      assert.equal(refused.status, 409);
+      assert.match(refused.body.message, /not linked a wallet/);
+    });
+
+    test("student screen: every pending credential is listed, oldest first, until it is claimed", async () => {
+      const w = await world();
+      const degree = await w.issue("QmPendingDegree");
+      const provisional = await w.issue("QmPendingProvisional");
+      await w.as(w.head)("POST", `/institution/credentials/${provisional._id}/status`, { status: "SUSPENDED", reason: "Fee dispute" });
+      const list = async () => (await call("GET", `/student/credentials/next/${w.oldWallet}`, { token: w.student.token })).body;
+
+      const before = await list();
+      assert.equal(before.authorized, true, JSON.stringify(before));
+      assert.deepEqual(before.credentials.map((credential) => credential._id), [String(degree._id), String(provisional._id)]);
+      const [first, second] = before.credentials;
+      assert.equal(first.revision, 1);
+      assert.ok(first.confirmationDeadline);
+      assert.equal(first.existingReport, false);
+      assert.equal(first.academicStatus, "ACTIVE");
+      assert.equal(second.academicStatus, "SUSPENDED"); // shown, so the student knows why it can't be claimed
+
+      assert.equal((await w.claim(degree)).status, 200);
+      const after = await list();
+      assert.deepEqual(after.credentials.map((credential) => credential._id), [String(provisional._id)]);
+    });
+
+    test("issuing: every credential needs an enrollment and metadata pinned through DegreeNFT for that college", async () => {
+      const w = await world();
+      const profileEnrollment = await Enrollment.create({ institutionId: w.college._id, studentId: w.profile._id, programSessionId: (await ProgramSession.create({ institutionId: w.college._id, programId: (await Program.create({ institutionId: w.college._id, code: "PIN", name: "Pin" }))._id, startYear: 2021, endYear: 2025, code: "PIN-2021" }))._id, programId: (await Program.findOne({ institutionId: w.college._id, code: "PIN" }))._id });
+      const body = { ...allocation(w.oldWallet), ipfsHash: "QmPinRule", uri: "https://ipfs.io/ipfs/QmPinRule" };
+      const issue = (extra) => call("POST", "/institution/credentials", { token: w.head.token, institution: w.college, body: { ...body, ...extra }, raw: true });
+
+      const noEnrollment = await issue({});
+      assert.equal(noEnrollment.status, 400);
+      assert.match(noEnrollment.body.message, /enrollment/);
+      const notPinned = await issue({ enrollmentId: String(profileEnrollment._id) });
+      assert.equal(notPinned.status, 400);
+      assert.match(notPinned.body.message, /not pinned/);
+
+      // pinned for ANOTHER college does not count
+      const other = await makeInstitution(await makeUser("institution"), "VERIFIED");
+      await PinnedMetadata.create({ institutionId: other._id, cid: "QmPinRule", sha256: "x" });
+      assert.equal((await issue({ enrollmentId: String(profileEnrollment._id) })).status, 400);
+
+      await PinnedMetadata.create({ institutionId: w.college._id, cid: "QmPinRule", sha256: "x" });
+      assert.equal((await issue({ enrollmentId: String(profileEnrollment._id), uri: "https://evil.example/other.json" })).status, 400); // link to a different file
+      const ok = await issue({ enrollmentId: String(profileEnrollment._id) });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body));
+      assert.equal(ok.body.credential.studentWallet, w.oldWallet);
     });
 
     test("a request can be rejected with a reason, and then nothing happens", async () => {
@@ -2293,7 +2438,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal((await w.as(w.secondAdmin)("POST", `/institution/credential-requests/${requestId}/reject`, {})).status, 400);
       const rejected = await w.as(w.secondAdmin)("POST", `/institution/credential-requests/${requestId}/reject`, { reason: "Checked: it is correct" });
       assert.equal(rejected.body.request.status, "REJECTED");
-      assert.equal((await w.as(w.head)("POST", `/institution/credential-requests/${requestId}/approve-first`)).status, 409);
+      assert.equal((await w.approveWith(w.head, requestId, w.approvers[0], { confirmIrreversible: "true" })).status, 409);
       // closed, so a new request for the same credential is allowed
       assert.equal((await w.as(w.head)("POST", `/institution/credentials/${credential._id}/burn`, { reason: "New reason" })).status, 201);
     });

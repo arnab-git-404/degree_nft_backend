@@ -38,6 +38,7 @@ router.post(
 router.post("/ipfs/pin-json", rateLimit({ bucket: "ipfs-pin", max: 30 }), protect, requireInstitution("credential:create"), credentialController.pinMetadata);
 router.post("/institution/credentials", protect, requireInstitution("credential:create"), credentialController.issueCredential);
 router.get("/institution/credentials", protect, requireInstitution("credential:read"), credentialController.listCollegeCredentials);
+router.post("/institution/credentials/resolve", protect, requireInstitution("credential:create"), credentialController.resolveCredentialRows);
 router.post("/institution/credentials/:credentialId/revise", protect, requireInstitution("credential:create"), credentialController.reviseCredential);
 router.get("/student/credentials/next/:walletAddress", protect, requirePermission("credential:read"), credentialController.getNextCredential);
 router.get("/student/credentials/minted/:walletAddress", protect, requirePermission("credential:read"), credentialController.getMintedCredentials);
@@ -69,9 +70,10 @@ router.post("/institution/credentials/:credentialId/status", protect, requireIns
 router.post("/institution/credentials/:credentialId/burn", protect, requireInstitution("credential:burn"), requestController.requestBurn);
 router.post("/institution/students/:studentId/recovery", protect, requireInstitution("credential:recover"), requestController.startRecovery);
 router.get("/institution/credential-requests", protect, requireInstitution(), requestController.listRequests);
-router.post("/institution/credential-requests/:requestId/approve-first", protect, requireInstitution("approval:first"), requestController.approveFirst);
-router.post("/institution/credential-requests/:requestId/approve-final", protect, requireInstitution("approval:final"), requestController.approveFinal);
-router.post("/institution/credential-requests/:requestId/retry", protect, requireInstitution("approval:final"), requestController.retryRequest);
+// Officials approve with their wallets (Squads multisig): get the transaction to sign, then send it back signed.
+router.get("/institution/credential-requests/:requestId/approval-tx", protect, requireInstitution(), requestController.getApprovalTx);
+router.post("/institution/credential-requests/:requestId/approval-tx", protect, requireInstitution(), requestController.submitApprovalTx);
+router.post("/institution/credential-requests/:requestId/retry", protect, requireInstitution(), requestController.retryRequest);
 router.post("/institution/credential-requests/:requestId/reject", protect, requireInstitution(), requestController.rejectRequest);
 
 // Billing: the college's prepaid balance (on-chain payments to the DegreeNFT treasury, charges per minted credential)

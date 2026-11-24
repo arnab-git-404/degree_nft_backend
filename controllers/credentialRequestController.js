@@ -6,7 +6,6 @@ import Nft from "../models/nft.js";
 import Wallet from "../models/wallet.js";
 import CollegeChain from "../models/collegeChain.js";
 import { chain, assertSameNetwork } from "../utils/chain.js";
-import { decryptSecret } from "../utils/secretBox.js";
 import { buildRecoveryUrl, createActivationToken, STUDENT_INVITE_DAYS } from "../utils/activationToken.js";
 import { trySendTemplateEmail } from "../services/emailService.js";
 import { audit } from "../utils/audit.js";
@@ -144,42 +143,108 @@ export const listRequests = asyncHandler(async (req, res) => {
     .sort({ createdAt: -1 })
     .limit(200)
     .lean();
-  res.status(200).json({ success: true, requests });
+  // Who can approve, and how many must: the page shows "1 of 2" and which wallets may sign.
+  const college = await CollegeChain.findOne({ institutionId: req.institution._id }).lean();
+  const multisig = college?.multisig && { threshold: college.multisig.threshold, members: college.multisig.members };
+  res.status(200).json({ success: true, requests, multisig });
 });
 
-export const approveFirst = asyncHandler(async (req, res) => {
-  const request = await ownRequest(req);
-  if (request.status !== "PENDING_APPROVAL") throw new AppError(waitingMessage(request), 409);
-  if (request.approvals?.first?.userId) throw new AppError("The first approval is already given", 409);
-  request.approvals.first = who(req);
-  await request.save();
-  await audit(req, approvalLog(request, "first"));
-  res.status(200).json({ success: true, request });
-});
+// Officials approve with their own wallets: the college's Squads multisig counts the approvals on-chain, so a
+// recovery or burn needs `threshold` different officials even if this server were compromised. The app only builds
+// the approval for the official to sign, sends it, and runs the action once the chain says it is approved.
+const canApprove = (req) => memberCan(req, "approval:first") || memberCan(req, "approval:final");
 
-// The second approval, by a different person, runs the action on-chain straight away.
-export const approveFinal = asyncHandler(async (req, res) => {
-  const request = await ownRequest(req);
+const collegeFor = async (request) => {
+  const college = await CollegeChain.findOne({ institutionId: request.institutionId });
+  if (!college?.multisig?.address) throw new AppError("This college's collection has no officials' multisig; it must be set up again", 409);
+  assertSameNetwork(college);
+  return college;
+};
+
+const approverChecks = async (req, request) => {
+  if (!canApprove(req)) throw new AppError("Forbidden", 403);
   if (request.status !== "PENDING_APPROVAL") throw new AppError(waitingMessage(request), 409);
-  if (!request.approvals?.first?.userId) throw new AppError("The first approval is needed before the final one", 409);
-  if (String(request.approvals.first.userId) === String(req.user._id)) {
-    throw new AppError("The final approval must come from a different person than the first", 403);
-  }
-  if (request.kind === "BURN" && req.body?.confirmIrreversible !== true) {
+  const wallet = String(req.query.wallet || req.body?.wallet || "");
+  const college = await collegeFor(request);
+  if (!college.multisig.members.includes(wallet)) throw new AppError("This wallet is not one of the college's approving officials", 403);
+  if (request.walletApprovals.some((approval) => approval.wallet === wallet)) throw new AppError("This wallet has already approved", 409);
+  if (request.kind === "BURN" && String(req.query.confirmIrreversible ?? req.body?.confirmIrreversible) !== "true") {
     throw new AppError("Burning cannot be undone: confirm it explicitly", 400);
   }
-  request.approvals.final = who(req);
+  return { wallet, college };
+};
+
+// The minted assets a request acts on: the student's credentials (recovery) or the one credential (burn).
+const assetsFor = async (request) => {
+  if (request.kind === "BURN") return Nft.find({ credentialId: request.credentialId, status: "MINTED" });
+  const oldWallets = (await Wallet.find({ userId: request.fromUserId }).lean()).map((wallet) => wallet.address);
+  const credentials = await Credential.find({
+    institutionId: request.institutionId,
+    $or: [{ studentId: request.studentId }, { studentWallet: { $in: oldWallets } }],
+  }).select("_id");
+  return Nft.find({ credentialId: { $in: credentials.map((credential) => credential._id) }, status: "MINTED", ownerWallet: { $ne: request.toWallet } });
+};
+
+// The on-chain proposal holding exactly what this request does; made once, when the first official asks to approve.
+// shortcut: all assets go in one vault transaction (fine for a few credentials); split it if a student holds many.
+const ensureProposal = async (request, college) => {
+  if (request.proposal?.transactionIndex) return;
+  const nfts = await assetsFor(request);
+  if (!nfts.length) throw new AppError("There is no minted credential for this request to act on", 409);
+  const actions = nfts.map((nft) =>
+    request.kind === "RECOVERY"
+      ? { kind: "transfer", assetAddress: nft.assetAddress, collectionAddress: nft.collectionAddress, newOwner: request.toWallet }
+      : { kind: "burn", assetAddress: nft.assetAddress, collectionAddress: nft.collectionAddress },
+  );
+  const { transactionIndex } = await chain.proposeVaultActions({ multisigAddress: college.multisig.address, vaultAddress: college.multisig.vault, actions });
+  request.proposal = { transactionIndex, assets: nfts.map((nft) => nft.assetAddress) };
   await request.save();
-  await audit(req, approvalLog(request, "final"));
-  await execute(req, request);
-  res.status(200).json({ success: true, request });
+};
+
+// Step 1: the approval transaction for one official's wallet to sign (the platform pays its fee).
+export const getApprovalTx = asyncHandler(async (req, res) => {
+  const request = await ownRequest(req);
+  const { wallet, college } = await approverChecks(req, request);
+  await ensureProposal(request, college);
+  const transaction = await chain.buildApprovalTx({ multisigAddress: college.multisig.address, transactionIndex: request.proposal.transactionIndex, member: wallet });
+  res.status(200).json({ success: true, transaction, approvals: request.walletApprovals.length, threshold: college.multisig.threshold });
 });
 
-// A request whose on-chain step failed (RPC trouble) can be run again by a final approver; approvals stay.
+// Step 2: the official's signed approval. Once enough officials approved on-chain, the action runs.
+export const submitApprovalTx = asyncHandler(async (req, res) => {
+  const request = await ownRequest(req);
+  const { wallet, college } = await approverChecks(req, request);
+  if (!request.proposal?.transactionIndex) throw new AppError("Ask for the approval transaction first", 409);
+  const { signature } = await chain.submitApprovalTx({
+    multisigAddress: college.multisig.address,
+    transactionIndex: request.proposal.transactionIndex,
+    member: wallet,
+    signedTransaction: String(req.body?.signedTransaction || ""),
+  });
+  const approval = { wallet, userId: req.user._id, name: req.user.name, at: new Date(), signature };
+  request.walletApprovals.push(approval);
+  // Kept for the request history: who approved first, and whose approval completed it.
+  if (!request.approvals?.first?.userId) request.approvals.first = approval;
+  else request.approvals.final = approval;
+  await request.save();
+  await audit(req, {
+    action: `credential.${request.kind.toLowerCase()}.approve`,
+    scope: "INSTITUTION",
+    targetType: "CredentialRequest",
+    targetId: request._id,
+    summary: `Approved a ${request.kind.toLowerCase()} request with wallet ${wallet}`,
+    details: { wallet, signature, approvals: request.walletApprovals.length, threshold: college.multisig.threshold },
+  });
+  await execute(req, request, college);
+  res.status(200).json({ success: true, request, threshold: college.multisig.threshold });
+});
+
+// The on-chain step failed (RPC trouble) after the officials approved: run it again; approvals stay.
 export const retryRequest = asyncHandler(async (req, res) => {
+  if (!canApprove(req)) throw new AppError("Forbidden", 403);
   const request = await ownRequest(req);
   if (request.status !== "FAILED") throw new AppError("Only a failed request can be run again", 409);
-  await execute(req, request);
+  await execute(req, request, await collegeFor(request));
   res.status(200).json({ success: true, request });
 });
 
@@ -203,22 +268,26 @@ export const rejectRequest = asyncHandler(async (req, res) => {
 
 const waitingMessage = (request) =>
   request.status === "WAITING_FOR_WALLET" ? "The student has not proved the new wallet yet" : `This request is ${request.status.toLowerCase().replace(/_/g, " ")}`;
-const approvalLog = (request, stage) => ({
-  action: `credential.${request.kind.toLowerCase()}.approve`,
-  scope: "INSTITUTION",
-  targetType: "CredentialRequest",
-  targetId: request._id,
-  summary: `Gave the ${stage} approval for a ${request.kind.toLowerCase()} request`,
-  details: { stage },
-});
 
 // ---------------------------------------------------------------- running the action on-chain
 
-const execute = async (req, request) => {
-  const college = await CollegeChain.findOne({ institutionId: request.institutionId }).select("+keys.recovery.secretEncrypted +keys.burn.secretEncrypted");
-  if (!college) throw new AppError("This college has no on-chain collection", 409);
-  assertSameNetwork(college);
-  const ok = request.kind === "RECOVERY" ? await runRecovery(request, college) : await runBurn(request, college);
+// Runs the approved proposal (if not already run), then records what the chain now shows.
+const execute = async (req, request, college) => {
+  const ref = { multisigAddress: college.multisig.address, transactionIndex: request.proposal.transactionIndex };
+  const proposal = await chain.getProposal(ref);
+  if (!proposal || !["Approved", "Executed"].includes(proposal.status)) return; // still waiting for more officials
+  let ok = true;
+  if (proposal.status === "Approved") {
+    try {
+      const { signature } = await chain.executeProposal(ref);
+      request.results.push({ signature, at: new Date() });
+    } catch (error) {
+      // It may have landed anyway (timeout): the records below are only updated from what the chain shows.
+      request.results.push({ error: String(error.message).slice(0, 300), at: new Date() });
+      ok = (await chain.getProposal(ref))?.status === "Executed";
+    }
+  }
+  if (ok) ok = request.kind === "RECOVERY" ? await applyRecovery(request) : await applyBurn(request);
   request.status = ok ? "EXECUTED" : "FAILED";
   if (ok) request.set({ open: false, executedAt: new Date(), tokenHash: undefined });
   await request.save();
@@ -233,96 +302,65 @@ const execute = async (req, request) => {
   });
 };
 
-// Moves every minted credential of this student at this college to the proved wallet, keeps the history,
-// re-points unminted credentials, and links the student profile to the new account (old link kept in walletHistory).
-const runRecovery = async (request, college) => {
-  const recoverySecret = decryptSecret(college.keys.recovery.secretEncrypted);
-  // This college's credentials of this student: by profile, or (issued without an enrollment) by the old account's wallets.
+// After the vault moved the assets: record the new owner (history kept), re-point the student's credentials, and link
+// the student profile to the new account (the old link is kept in walletHistory).
+const applyRecovery = async (request) => {
+  const signature = request.results.at(-1)?.signature;
+  for (const assetAddress of request.proposal.assets) {
+    const onChain = await chain.getAsset(assetAddress);
+    if (onChain?.owner !== request.toWallet) {
+      request.results.push({ assetAddress, error: "not owned by the new wallet on-chain", at: new Date() });
+      return false;
+    }
+    const nft = await Nft.findOne({ assetAddress });
+    if (nft.ownerWallet !== request.toWallet) {
+      nft.set({ ownerWallet: request.toWallet, userId: request.toUserId });
+      nft.ownerHistory.push({ wallet: request.toWallet, at: new Date(), reason: `RECOVERED: ${request.reason}`, signature });
+      await nft.save();
+    }
+  }
   const oldWallets = (await Wallet.find({ userId: request.fromUserId }).lean()).map((wallet) => wallet.address);
-  const credentials = await Credential.find({
-    institutionId: request.institutionId,
-    $or: [{ studentId: request.studentId }, { studentWallet: { $in: oldWallets } }],
-  });
   const newWallet = await Wallet.findOne({ chain: "solana", address: request.toWallet });
-  let ok = true;
-
-  for (const credential of credentials) {
-    const nft = await Nft.findOne({ credentialId: credential._id, status: "MINTED" });
-    if (nft && nft.ownerWallet !== request.toWallet) {
-      try {
-        const onChain = await chain.getAsset(nft.assetAddress);
-        let signature;
-        if (onChain?.owner !== request.toWallet) {
-          ({ signature } = await chain.transferAsset({
-            assetAddress: nft.assetAddress,
-            collectionAddress: nft.collectionAddress,
-            recoverySecret,
-            newOwner: request.toWallet,
-          }));
-        }
-        const after = await chain.getAsset(nft.assetAddress);
-        if (after?.owner !== request.toWallet) throw new Error("the asset is not owned by the new wallet after the transfer");
-        nft.ownerWallet = request.toWallet;
-        nft.userId = request.toUserId;
-        nft.ownerHistory.push({ wallet: request.toWallet, at: new Date(), reason: `RECOVERED: ${request.reason}`, signature });
-        await nft.save();
-        request.results.push({ assetAddress: nft.assetAddress, signature, at: new Date() });
-      } catch (error) {
-        ok = false;
-        request.results.push({ assetAddress: nft.assetAddress, error: String(error.message).slice(0, 300), at: new Date() });
-        continue; // leave this credential on the old wallet; a retry picks it up
-      }
-    }
-    credential.set({ studentWallet: request.toWallet, userId: request.toUserId, ...(newWallet && { studentWalletId: newWallet._id }) });
-    await credential.save();
+  await Credential.updateMany(
+    { institutionId: request.institutionId, $or: [{ studentId: request.studentId }, { studentWallet: { $in: oldWallets } }] },
+    { $set: { studentWallet: request.toWallet, userId: request.toUserId, ...(newWallet && { studentWalletId: newWallet._id }) } },
+  );
+  const student = await Student.findById(request.studentId);
+  if (String(student.userId) !== String(request.toUserId)) {
+    student.walletHistory.push({
+      userId: student.userId,
+      wallet: (await Wallet.findOne({ userId: student.userId, isPrimary: true }))?.address,
+      linkedAt: student.claimedAt,
+      unlinkedAt: new Date(),
+      reason: request.reason,
+      requestId: request._id,
+    });
+    student.set({ userId: request.toUserId, claimedAt: new Date() });
+    await student.save();
   }
-
-  if (ok) {
-    const student = await Student.findById(request.studentId);
-    if (String(student.userId) !== String(request.toUserId)) {
-      student.walletHistory.push({
-        userId: student.userId,
-        wallet: (await Wallet.findOne({ userId: student.userId, isPrimary: true }))?.address,
-        linkedAt: student.claimedAt,
-        unlinkedAt: new Date(),
-        reason: request.reason,
-        requestId: request._id,
-      });
-      student.set({ userId: request.toUserId, claimedAt: new Date() });
-      await student.save();
-    }
-  }
-  return ok;
+  return true;
 };
 
-const runBurn = async (request, college) => {
-  const nft = await Nft.findOne({ credentialId: request.credentialId, status: "MINTED" });
-  if (!nft) {
-    request.results.push({ error: "no minted credential to burn", at: new Date() });
-    return false;
-  }
-  try {
-    let signature;
-    if (await chain.getAsset(nft.assetAddress)) {
-      ({ signature } = await chain.burnAsset({
-        assetAddress: nft.assetAddress,
-        collectionAddress: nft.collectionAddress,
-        burnSecret: decryptSecret(college.keys.burn.secretEncrypted),
-      }));
+const applyBurn = async (request) => {
+  const signature = request.results.at(-1)?.signature;
+  for (const assetAddress of request.proposal.assets) {
+    if (await chain.getAsset(assetAddress)) {
+      request.results.push({ assetAddress, error: "the asset still exists on-chain", at: new Date() });
+      return false;
     }
-    if (await chain.getAsset(nft.assetAddress)) throw new Error("the asset still exists after the burn");
-    nft.status = "BURNED";
-    nft.ownerHistory.push({ wallet: nft.ownerWallet, at: new Date(), reason: `BURNED: ${request.reason}`, signature });
-    await nft.save();
-    // The academic record stays (history is never deleted); it is no longer valid.
-    const credential = await Credential.findById(request.credentialId);
+    const nft = await Nft.findOne({ assetAddress });
+    if (nft.status !== "BURNED") {
+      nft.status = "BURNED";
+      nft.ownerHistory.push({ wallet: nft.ownerWallet, at: new Date(), reason: `BURNED: ${request.reason}`, signature });
+      await nft.save();
+    }
+  }
+  // The academic record stays (history is never deleted); it is no longer valid.
+  const credential = await Credential.findById(request.credentialId);
+  if (credential.academicStatus !== "REVOKED") {
     credential.academicStatus = "REVOKED";
     credential.statusHistory.push({ status: "REVOKED", reason: `Burned on-chain: ${request.reason}`, at: new Date() });
     await credential.save();
-    request.results.push({ assetAddress: nft.assetAddress, signature, at: new Date() });
-    return true;
-  } catch (error) {
-    request.results.push({ assetAddress: nft.assetAddress, error: String(error.message).slice(0, 300), at: new Date() });
-    return false;
   }
+  return true;
 };

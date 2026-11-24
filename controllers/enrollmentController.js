@@ -148,6 +148,55 @@ export const updateEnrollment = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Sheet rows name a student by registration no. and a batch by program code + start year (+ end year when several
+ * batches of that program start the same year). Used by the enrollment import and the credential batch upload.
+ * Returns, per row: { rowNo, row, student, program, batch } or { rowNo, row, error } with a plain reason.
+ */
+export const matchStudentBatchRows = async (institutionId, rows) => {
+  const text = (value) => String(value ?? "").trim();
+  const upper = (value) => text(value).toUpperCase();
+
+  // Look everything up once for the whole chunk.
+  const [students, programs] = await Promise.all([
+    Student.find({ institutionId, registrationNo: { $in: [...new Set(rows.map((row) => upper(row?.registrationNo)).filter(Boolean))] } })
+      .select("registrationNo fullName")
+      .lean(),
+    Program.find({ institutionId, code: { $in: [...new Set(rows.map((row) => upper(row?.programCode)).filter(Boolean))] } })
+      .select("code name")
+      .lean(),
+  ]);
+  const batches = await ProgramSession.find({ institutionId, programId: { $in: programs.map((program) => program._id) } })
+    .select("programId startYear endYear")
+    .lean();
+  const studentByNo = new Map(students.map((student) => [student.registrationNo, student]));
+  const programByCode = new Map(programs.map((program) => [program.code, program]));
+
+  return rows.map((row, index) => {
+    const rowNo = Number.isInteger(row?.row) ? row.row : index + 2;
+    const failed = (error) => ({ rowNo, row, error });
+    const registrationNo = upper(row?.registrationNo);
+    const programCode = upper(row?.programCode);
+    const startYear = Number(text(row?.startYear));
+    const endYear = text(row?.endYear) ? Number(text(row.endYear)) : null;
+
+    if (!registrationNo) return failed("Registration no. is required");
+    if (!programCode) return failed("Program code is required");
+    if (!Number.isInteger(startYear)) return failed("Batch start year is required (e.g. 2022)");
+    const student = studentByNo.get(registrationNo);
+    if (!student) return failed(`No student with registration no. ${registrationNo} (add the student first)`);
+    const program = programByCode.get(programCode);
+    if (!program) return failed(`No program with code ${programCode}`);
+
+    const matches = batches.filter(
+      (batch) => batch.programId.equals(program._id) && batch.startYear === startYear && (endYear === null || batch.endYear === endYear)
+    );
+    if (matches.length === 0) return failed(`${programCode} has no batch starting in ${startYear}${endYear ? `-${endYear}` : ""}`);
+    if (matches.length > 1) return failed(`${programCode} has several batches starting in ${startYear}; add the end year`);
+    return { rowNo, row, student, program, batch: matches[0] };
+  });
+};
+
+/**
  * Excel import. Each row names the student by registration no. and the batch by program code + start year
  * (+ end year when several batches of that program start the same year). Good rows are saved; the rest come
  * back with their sheet row number and a plain reason.
@@ -158,50 +207,15 @@ export const importEnrollments = asyncHandler(async (req, res) => {
   if (rows.length > IMPORT_LIMIT) throw new AppError(`Send at most ${IMPORT_LIMIT} enrollments per request`, 400);
 
   const institutionId = req.institution._id;
-  const text = (value) => String(value ?? "").trim();
-  const upper = (value) => text(value).toUpperCase();
-
-  // Look everything up once for the whole chunk.
-  const [students, programs] = await Promise.all([
-    Student.find({ institutionId, registrationNo: { $in: [...new Set(rows.map((row) => upper(row?.registrationNo)).filter(Boolean))] } })
-      .select("registrationNo fullName")
-      .lean(),
-    Program.find({ institutionId, code: { $in: [...new Set(rows.map((row) => upper(row?.programCode)).filter(Boolean))] } })
-      .select("code")
-      .lean(),
-  ]);
-  const batches = await ProgramSession.find({ institutionId, programId: { $in: programs.map((program) => program._id) } })
-    .select("programId startYear endYear")
-    .lean();
-  const studentByNo = new Map(students.map((student) => [student.registrationNo, student]));
-  const programByCode = new Map(programs.map((program) => [program.code, program]));
+  const upper = (value) => String(value ?? "").trim().toUpperCase();
 
   const failed = [];
   const valid = [];
   const seen = new Map(); // studentId:batchId -> first row
 
-  for (const [index, row] of rows.entries()) {
-    const rowNo = Number.isInteger(row?.row) ? row.row : index + 2;
+  for (const { rowNo, row, error, student, program, batch } of await matchStudentBatchRows(institutionId, rows)) {
     const fail = (message) => failed.push({ row: rowNo, message });
-    const registrationNo = upper(row?.registrationNo);
-    const programCode = upper(row?.programCode);
-    const startYear = Number(text(row?.startYear));
-    const endYear = text(row?.endYear) ? Number(text(row.endYear)) : null;
-
-    if (!registrationNo) { fail("Registration no. is required"); continue; }
-    if (!programCode) { fail("Program code is required"); continue; }
-    if (!Number.isInteger(startYear)) { fail("Batch start year is required (e.g. 2022)"); continue; }
-    const student = studentByNo.get(registrationNo);
-    if (!student) { fail(`No student with registration no. ${registrationNo} (add the student first)`); continue; }
-    const program = programByCode.get(programCode);
-    if (!program) { fail(`No program with code ${programCode}`); continue; }
-
-    const matches = batches.filter(
-      (batch) => batch.programId.equals(program._id) && batch.startYear === startYear && (endYear === null || batch.endYear === endYear)
-    );
-    if (matches.length === 0) { fail(`${programCode} has no batch starting in ${startYear}${endYear ? `-${endYear}` : ""}`); continue; }
-    if (matches.length > 1) { fail(`${programCode} has several batches starting in ${startYear}; add the end year`); continue; }
-    const batch = matches[0];
+    if (error) { fail(error); continue; }
 
     const key = `${student._id}:${batch._id}`;
     if (seen.has(key)) { fail(`Same student and batch as row ${seen.get(key)}`); continue; }

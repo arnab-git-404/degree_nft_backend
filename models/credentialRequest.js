@@ -65,6 +65,9 @@ const CredentialRequestSchema = new mongoose.Schema(
     },
 
     approvals: { first: approval, final: approval },
+    // The Squads proposal holding the on-chain action, and the officials' wallet approvals on it (append-only).
+    proposal: { transactionIndex: String, assets: [String] },
+    walletApprovals: [{ _id: false, wallet: String, userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, name: String, at: Date, signature: String }],
     rejection: {
       userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       name: String,
