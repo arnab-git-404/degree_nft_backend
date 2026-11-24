@@ -28,7 +28,8 @@ export const pickPayment = (balances, prices) => {
 
 // Credits new on-chain payments from the college's registered wallet. Safe to run any number of times.
 export const syncDeposits = async (institution) => {
-  const deposits = await chain.findDeposits({ from: institution.walletAddress });
+  const credited = await BillingEntry.find({ institutionId: institution._id, kind: "DEPOSIT" }).select("signature").lean();
+  const deposits = await chain.findDeposits({ from: institution.walletAddress, knownSignatures: new Set(credited.map((entry) => entry.signature)) });
   const added = [];
   for (const deposit of deposits) {
     try {

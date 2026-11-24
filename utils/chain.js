@@ -16,6 +16,16 @@ export const usdcMint = () =>
   process.env.USDC_MINT ||
   (network() === "mainnet" ? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" : "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
+// A college collection lives on one network; never act on it while the server points at another.
+export const assertSameNetwork = (record) => {
+  if (record.network !== network()) {
+    throw new AppError(`This college's collection is on ${record.network}, but the server is running on ${network()}`, 409);
+  }
+};
+
+// Below this the fee wallet cannot be trusted to finish a mint: claims pause instead of failing half-way.
+export const FEE_PAYER_MIN_LAMPORTS = Math.round(Number(process.env.FEE_PAYER_MIN_SOL || 0.05) * 1e9);
+
 export const treasuryAddress = () => {
   const address = process.env.DEGREENFT_TREASURY_ADDRESS;
   if (!address) throw new AppError("DEGREENFT_TREASURY_ADDRESS is not configured on the server", 503);
@@ -38,13 +48,38 @@ const tokenAccountOf = (owner, mint) =>
   PublicKey.findProgramAddressSync([new PublicKey(owner).toBuffer(), TOKEN_PROGRAM.toBuffer(), new PublicKey(mint).toBuffer()], ATA_PROGRAM)[0].toBase58();
 
 // ---------------------------------------------------------------- real Solana
+const readUmi = () => createUmi(rpcUrl(), "confirmed").use(mplCore());
+
+// Every on-chain WRITE signs here. On Mainnet the college keys are still platform-held in the database
+// (see models/collegeChain.js), so writes stay locked until proper key custody is in place and approved.
+export const signingLocked = () => network() === "mainnet" && process.env.MAINNET_KEY_CUSTODY_APPROVED !== "true";
+export const assertSigningAllowed = () => {
+  if (signingLocked()) {
+    throw new AppError("Mainnet writes are locked until key custody (KMS/HSM) is set up and MAINNET_KEY_CUSTODY_APPROVED=true", 503);
+  }
+};
+
 const umiWithFeePayer = () => {
-  const umi = createUmi(rpcUrl(), "confirmed").use(mplCore());
+  assertSigningAllowed();
+  const umi = readUmi();
   const payer = createSignerFromKeypair(umi, umi.eddsa.createKeypairFromSecretKey(feePayerSecret()));
   return umi.use(signerIdentity(payer));
 };
 const signerFrom = (umi, secret) => createSignerFromKeypair(umi, umi.eddsa.createKeypairFromSecretKey(bs58.decode(secret)));
 const confirmed = { confirm: { commitment: "confirmed" } };
+
+// Public RPCs answer 429 when called too fast: wait and try again (1s, 2s, 4s) before giving up.
+const withRpcRetry = async (call) => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      const limited = error?.code === 429 || /429|Too many requests/i.test(String(error?.message));
+      if (!limited || attempt >= 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+    }
+  }
+};
 
 const real = {
   newKeypair() {
@@ -54,8 +89,9 @@ const real = {
   },
 
   async feePayerBalance() {
-    const umi = umiWithFeePayer();
-    return { address: String(umi.identity.publicKey), lamports: Number((await umi.rpc.getBalance(umi.identity.publicKey)).basisPoints) };
+    const umi = readUmi();
+    const { publicKey } = umi.eddsa.createKeypairFromSecretKey(feePayerSecret());
+    return { address: String(publicKey), lamports: Number((await umi.rpc.getBalance(publicKey)).basisPoints) };
   },
 
   // The college collection, configured as proven on Devnet (solana-poc/FINDINGS.md): students can't move or burn,
@@ -116,28 +152,34 @@ const real = {
   // null when the asset does not exist (never minted, or burned). An RPC failure throws, so callers never
   // mistake "the chain is unreachable" for "the credential does not exist".
   async getAsset(address) {
+    const umi = readUmi();
     try {
-      const asset = await fetchAsset(umiWithFeePayer(), address);
+      const asset = await fetchAsset(umi, address);
       return { owner: String(asset.owner), collection: String(asset.updateAuthority.address) };
     } catch (error) {
       if (error?.name === "AccountNotFoundError") return null;
+      // A burned Core asset leaves a tiny marker account that is no longer an asset: that is "gone", not an RPC failure.
+      const account = await umi.rpc.getAccount(address); // throws if the RPC is really down
+      if (!account.exists || account.data.length <= 1) return null;
       throw error;
     }
   },
 
-  // Payments into the treasury from one wallet: SOL transfers and USDC token transfers, newest first.
-  // shortcut: reads the latest 100 transactions per account; page further back if a college pays very often.
-  async findDeposits({ from }) {
+  // Payments into the treasury from one college wallet: SOL transfers and USDC token transfers.
+  // Reads the COLLEGE wallet's own history (every payment is signed by it), not the shared treasury's, and skips
+  // transactions already credited, so a routine check costs almost no RPC calls.
+  // shortcut: looks at the wallet's latest 100 transactions; page further back if a college wallet is very busy.
+  async findDeposits({ from, knownSignatures = new Set() }) {
     const connection = new Connection(rpcUrl(), "confirmed");
     const treasury = treasuryAddress();
     const treasuryUsdc = tokenAccountOf(treasury, usdcMint());
     const found = new Map(); // `${signature}:${currency}` -> deposit
 
-    for (const account of [treasury, treasuryUsdc]) {
-      const signatures = await connection.getSignaturesForAddress(new PublicKey(account), { limit: 100 });
-      const ok = signatures.filter((entry) => !entry.err).map((entry) => entry.signature);
-      for (let i = 0; i < ok.length; i += 25) {
-        const transactions = await connection.getParsedTransactions(ok.slice(i, i + 25), { maxSupportedTransactionVersion: 0 });
+    {
+      const signatures = await withRpcRetry(() => connection.getSignaturesForAddress(new PublicKey(from), { limit: 100 }));
+      const ok = signatures.filter((entry) => !entry.err && !knownSignatures.has(entry.signature)).map((entry) => entry.signature);
+      for (let i = 0; i < ok.length; i += 5) {
+        const transactions = await withRpcRetry(() => connection.getParsedTransactions(ok.slice(i, i + 5), { maxSupportedTransactionVersion: 0 }));
         transactions.forEach((transaction, index) => {
           if (!transaction || transaction.meta?.err) return;
           const signature = ok[i + index];

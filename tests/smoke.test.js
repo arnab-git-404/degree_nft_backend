@@ -102,6 +102,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       dbName: process.env.MONGODB_DB_NAME || "DegreeNft",
     });
     await seedRoles();
+    process.env.RATE_LIMIT_DISABLED = "true";
     server = app.listen(0);
     base = `http://127.0.0.1:${server.address().port}/api`;
   });
@@ -1881,7 +1882,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
         });
         assert.equal(issued.status, 201, JSON.stringify(issued.body));
       }
-      const [degree, provisional] = [await Credential.findOne({ ipfsHash: "QmD" }), await Credential.findOne({ ipfsHash: "QmP" })];
+      const [degree, provisional] = [await Credential.findOne({ institutionId: institution._id, ipfsHash: "QmD" }), await Credential.findOne({ institutionId: institution._id, ipfsHash: "QmP" })];
       const confirm = (nft, extra = {}) =>
         call("POST", "/student/credentials/confirm", {
           token: student.token,
@@ -2186,6 +2187,102 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const revoked = await verify(assetAddress);
       assert.equal(revoked.status, "REVOKED");
       assert.equal(revoked.credential.academicStatus, "REVOKED");
+    });
+
+    test("hardening: public endpoints are rate limited per IP", async () => {
+      process.env.RATE_LIMIT_DISABLED = "false";
+      try {
+        const address = Keypair.generate().publicKey.toBase58();
+        let limited;
+        for (let i = 0; i < 70 && !limited; i++) {
+          const response = await fetch(`${base}/verify/${address}`);
+          if (response.status === 429) limited = response;
+        }
+        assert.ok(limited, "no 429 after 70 requests");
+        assert.ok(Number(limited.headers.get("retry-after")) > 0);
+      } finally {
+        process.env.RATE_LIMIT_DISABLED = "true";
+      }
+    });
+
+    test("hardening: Mainnet writes stay locked, and a college's collection is never used on the wrong network", async () => {
+      const w = await world();
+      const credential = await w.issue("QmLifeNetwork");
+      const other = await makeInstitution(await makeUser("institution"), "VERIFIED");
+      const cluster = process.env.SOLANA_CLUSTER;
+      process.env.SOLANA_CLUSTER = "mainnet";
+      try {
+        assert.equal((await call("POST", `/admin/institutions/${other._id}/chain`, { token: w.admin.token })).status, 503);
+        const wrongNetwork = await w.claim(credential); // the college collection was made on devnet
+        assert.equal(wrongNetwork.status, 409);
+        assert.match(wrongNetwork.body.message, /devnet/);
+        assert.equal(await Nft.countDocuments({ credentialId: credential._id }), 0);
+        const settings = await call("GET", "/admin/settings/billing", { token: w.admin.token });
+        assert.equal(settings.body.writesLocked, true);
+      } finally {
+        process.env.SOLANA_CLUSTER = cluster;
+      }
+    });
+
+    test("hardening: a low fee wallet pauses claims before anything is reserved or charged", async () => {
+      const w = await world();
+      const credential = await w.issue("QmLifeFeeLow");
+      const realBalance = fakeChain.feePayerBalance;
+      fakeChain.feePayerBalance = async () => ({ address: "FakeFeePayer", lamports: 1000 });
+      try {
+        const paused = await w.claim(credential);
+        assert.equal(paused.status, 503);
+        assert.equal(await Nft.countDocuments({ credentialId: credential._id }), 0);
+        assert.equal(await BillingEntry.countDocuments({ institutionId: w.college._id, kind: "CHARGE" }), 0);
+        assert.equal((await call("GET", "/admin/settings/billing", { token: w.admin.token })).body.feePayer.low, true);
+      } finally {
+        fakeChain.feePayerBalance = realBalance;
+      }
+      assert.equal((await w.claim(credential)).status, 200);
+    });
+
+    test("QA: five simultaneous claims (double clicks, retries) mint once and charge once", async () => {
+      const w = await world();
+      const credential = await w.issue("QmQaConcurrent");
+      const responses = await Promise.all(Array.from({ length: 5 }, () => w.claim(credential)));
+      const statuses = responses.map((response) => response.status);
+      assert.ok(statuses.includes(200), JSON.stringify(statuses));
+      assert.ok(statuses.every((status) => status === 200 || status === 409), JSON.stringify(statuses)); // the rest: "already being claimed"
+      const nfts = await Nft.find({ credentialId: credential._id });
+      assert.equal(nfts.length, 1);
+      assert.equal(await BillingEntry.countDocuments({ credentialId: credential._id, kind: "CHARGE" }), 1);
+      const minted = [...fakeChain.assets.entries()].filter(([address]) => address === nfts[0].assetAddress);
+      assert.equal(minted.length, 1);
+      // after the dust settles, claiming again returns the same NFT
+      const again = await w.claim(await Credential.findById(credential._id));
+      assert.equal(again.status, 200);
+      assert.equal(again.body.nft.assetAddress, nfts[0].assetAddress);
+      assert.equal((await Nft.findById(nfts[0]._id)).ownerHistory.length, 1);
+    });
+
+    test("QA: another college can neither see nor approve a request; revoking does not burn; a burn touches only its asset", async () => {
+      const w = await world();
+      const keep = await w.issue("QmQaKeep");
+      const gone = await w.issue("QmQaGone");
+      const keepAsset = (await w.claim(keep)).body.nft.assetAddress;
+      const goneAsset = (await w.claim(gone)).body.nft.assetAddress;
+
+      // revoking keeps the NFT on-chain (status lives in our records)
+      await w.as(w.head)("POST", `/institution/credentials/${keep._id}/status`, { status: "REVOKED", reason: "Board decision" });
+      assert.ok(fakeChain.assets.has(keepAsset));
+      assert.equal((await call("GET", `/verify/${keepAsset}`)).body.status, "REVOKED");
+
+      const requestId = (await w.as(w.head)("POST", `/institution/credentials/${gone._id}/burn`, { reason: "Duplicate" })).body.request._id;
+      const outsider = await makeUser("institution");
+      const elsewhere = await makeInstitution(outsider, "VERIFIED");
+      const foreign = (path) => call("POST", `/institution/credential-requests/${requestId}/${path}`, { token: outsider.token, institution: elsewhere, body: { confirmIrreversible: true } });
+      assert.equal((await foreign("approve-first")).status, 404);
+      assert.equal((await call("GET", "/institution/credential-requests", { token: outsider.token, institution: elsewhere })).body.requests.length, 0);
+
+      await w.as(w.head)("POST", `/institution/credential-requests/${requestId}/approve-first`);
+      await w.as(w.secondAdmin)("POST", `/institution/credential-requests/${requestId}/approve-final`, { confirmIrreversible: true });
+      assert.equal(fakeChain.assets.has(goneAsset), false);
+      assert.ok(fakeChain.assets.has(keepAsset)); // only the intended asset was burned
     });
 
     test("a request can be rejected with a reason, and then nothing happens", async () => {

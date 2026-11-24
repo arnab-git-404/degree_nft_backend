@@ -15,7 +15,7 @@ import Nft from "../models/nft.js";
 import CollegeChain from "../models/collegeChain.js";
 import BillingEntry from "../models/billingEntry.js";
 import { getBalances, getPrices, pickPayment } from "../services/billingService.js";
-import { chain } from "../utils/chain.js";
+import { chain, assertSameNetwork, FEE_PAYER_MIN_LAMPORTS } from "../utils/chain.js";
 import { encryptSecret, decryptSecret } from "../utils/secretBox.js";
 import { hasPermission } from "../middleware/auth.js";
 import { findOrCreateUserByWallet } from "../services/userWalletService.js";
@@ -486,11 +486,15 @@ export const claimCredential = asyncHandler(async (req, res) => {
 
   const college = await CollegeChain.findOne({ institutionId: credential.institutionId }).select("+keys.minting.secretEncrypted");
   if (!college) throw new AppError("Your college is not set up for on-chain credentials yet", 409);
+  assertSameNetwork(college);
 
   let nft = await Nft.findOne({ credentialId: credential._id }).select("+assetSecretEncrypted");
   if (nft && nft.status === "MINTED") return res.status(200).json({ success: true, nft: publicNft(nft) });
 
   if (!nft) {
+    if ((await chain.feePayerBalance()).lamports < FEE_PAYER_MIN_LAMPORTS) {
+      throw new AppError("Issuing is paused for a moment: the platform's fee wallet needs topping up. Nothing was charged; please try later.", 503);
+    }
     const payment = pickPayment(await getBalances(credential.institutionId), await getPrices());
     if (!payment) throw new AppError("Your college's DegreeNFT balance is too low to issue this credential. Please ask your college to top up.", 409);
     const asset = chain.newKeypair();

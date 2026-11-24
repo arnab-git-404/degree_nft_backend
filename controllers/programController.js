@@ -125,7 +125,12 @@ export const createProgramSession = asyncHandler(async (req, res) => {
 
   // Defaults when the form leaves them blank: code CSE-2026, name "CSE 2026–2030".
   const endYear = req.body?.endYear;
-  const code = (typeof req.body?.code === "string" && req.body.code.trim()) || `${program.code}-${startYear}`;
+  // A second batch starting the same year (lateral entry, 2022-2025 next to 2022-2026) gets the end year in its code.
+  const shortCode = `${program.code}-${startYear}`;
+  const defaultCode = (await ProgramSession.exists({ institutionId: req.institution._id, code: shortCode }))
+    ? `${shortCode}-${endYear}`
+    : shortCode;
+  const code = (typeof req.body?.code === "string" && req.body.code.trim()) || defaultCode;
   const name = (typeof req.body?.name === "string" && req.body.name.trim()) || `${program.code} ${startYear}–${endYear}`;
 
   const session = await saveUnique(

@@ -10,6 +10,7 @@ import * as credentialTypeController from "../controllers/credentialTypeControll
 import * as chainController from "../controllers/chainController.js";
 import * as requestController from "../controllers/credentialRequestController.js";
 import * as verifyController from "../controllers/verifyController.js";
+import { rateLimit } from "../middleware/rateLimit.js";
 import authRoutes from "./auth.js";
 import adminRoutes from "./admin.js";
 import { protect, requirePermission, requireInstitution } from "../middleware/auth.js";
@@ -34,14 +35,14 @@ router.post(
 );
 
 // Credentials: the college issues and corrects them, the student confirms and mints them
-router.post("/ipfs/pin-json", protect, requireInstitution("credential:create"), credentialController.pinMetadata);
+router.post("/ipfs/pin-json", rateLimit({ bucket: "ipfs-pin", max: 30 }), protect, requireInstitution("credential:create"), credentialController.pinMetadata);
 router.post("/institution/credentials", protect, requireInstitution("credential:create"), credentialController.issueCredential);
 router.get("/institution/credentials", protect, requireInstitution("credential:read"), credentialController.listCollegeCredentials);
 router.post("/institution/credentials/:credentialId/revise", protect, requireInstitution("credential:create"), credentialController.reviseCredential);
 router.get("/student/credentials/next/:walletAddress", protect, requirePermission("credential:read"), credentialController.getNextCredential);
 router.get("/student/credentials/minted/:walletAddress", protect, requirePermission("credential:read"), credentialController.getMintedCredentials);
 router.post("/student/credentials/confirm", protect, requirePermission("credential:confirm"), credentialController.confirmCredential);
-router.post("/student/credentials/claim", protect, requirePermission("credential:confirm"), credentialController.claimCredential);
+router.post("/student/credentials/claim", rateLimit({ bucket: "claim", max: 10 }), protect, requirePermission("credential:confirm"), credentialController.claimCredential);
 router.post("/student/credentials/report", protect, requirePermission("report:create"), credentialController.createReport);
 
 // Institution routes
@@ -61,7 +62,7 @@ router.patch(
 );
 
 // Public verification (no login): the link and QR on every issued credential
-router.get("/verify/:assetAddress", verifyController.verifyCredential);
+router.get("/verify/:assetAddress", rateLimit({ bucket: "verify", max: 60 }), verifyController.verifyCredential);
 
 // Credential lifecycle: academic status (one person), wallet recovery and burning (two approvals, two people)
 router.post("/institution/credentials/:credentialId/status", protect, requireInstitution("credential:revoke"), requestController.changeAcademicStatus);
@@ -75,7 +76,7 @@ router.post("/institution/credential-requests/:requestId/reject", protect, requi
 
 // Billing: the college's prepaid balance (on-chain payments to the DegreeNFT treasury, charges per minted credential)
 router.get("/institution/billing", protect, requireInstitution("billing:read"), chainController.getCollegeBilling);
-router.post("/institution/billing/sync", protect, requireInstitution("billing:read"), chainController.syncCollegeDeposits);
+router.post("/institution/billing/sync", rateLimit({ bucket: "billing-sync", max: 6 }), protect, requireInstitution("billing:read"), chainController.syncCollegeDeposits);
 
 // Credential types: the college's master list of what it issues
 router.get("/institution/credential-types", protect, requireInstitution("credentialType:read"), credentialTypeController.listCredentialTypes);

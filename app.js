@@ -4,6 +4,7 @@ import apiRoutes from "./routes/api.js";
 import { notFound, errorHandler } from "./middleware/errorHandler.js";
 
 const app = express();
+app.set("trust proxy", 1);
 
 const allowedOrigin = process.env.FRONTEND_URL;
 

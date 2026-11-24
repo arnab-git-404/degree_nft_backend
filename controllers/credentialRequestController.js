@@ -5,7 +5,7 @@ import Student from "../models/student.js";
 import Nft from "../models/nft.js";
 import Wallet from "../models/wallet.js";
 import CollegeChain from "../models/collegeChain.js";
-import { chain } from "../utils/chain.js";
+import { chain, assertSameNetwork } from "../utils/chain.js";
 import { decryptSecret } from "../utils/secretBox.js";
 import { buildRecoveryUrl, createActivationToken, STUDENT_INVITE_DAYS } from "../utils/activationToken.js";
 import { trySendTemplateEmail } from "../services/emailService.js";
@@ -217,6 +217,7 @@ const approvalLog = (request, stage) => ({
 const execute = async (req, request) => {
   const college = await CollegeChain.findOne({ institutionId: request.institutionId }).select("+keys.recovery.secretEncrypted +keys.burn.secretEncrypted");
   if (!college) throw new AppError("This college has no on-chain collection", 409);
+  assertSameNetwork(college);
   const ok = request.kind === "RECOVERY" ? await runRecovery(request, college) : await runBurn(request, college);
   request.status = ok ? "EXECUTED" : "FAILED";
   if (ok) request.set({ open: false, executedAt: new Date(), tokenHash: undefined });

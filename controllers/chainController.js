@@ -4,7 +4,7 @@ import Institution from "../models/institution.js";
 import CollegeChain from "../models/collegeChain.js";
 import BillingEntry, { UNITS } from "../models/billingEntry.js";
 import { getBalances, getPrices, syncDeposits } from "../services/billingService.js";
-import { chain, network, treasuryAddress, usdcMint } from "../utils/chain.js";
+import { chain, network, treasuryAddress, usdcMint, assertSigningAllowed, signingLocked, FEE_PAYER_MIN_LAMPORTS } from "../utils/chain.js";
 import { encryptSecret } from "../utils/secretBox.js";
 import { audit } from "../utils/audit.js";
 import AppError from "../utils/AppError.js";
@@ -46,6 +46,8 @@ export const getBillingSettings = asyncHandler(async (req, res) => {
   let feePayer = null;
   try {
     feePayer = await chain.feePayerBalance();
+    feePayer.low = feePayer.lamports < FEE_PAYER_MIN_LAMPORTS * 10; // warn well before claims pause
+    feePayer.pauseBelowSol = FEE_PAYER_MIN_LAMPORTS / 1e9;
   } catch (error) {
     feePayer = { error: error.message };
   }
@@ -56,6 +58,7 @@ export const getBillingSettings = asyncHandler(async (req, res) => {
     treasuryAddress: optional(treasuryAddress),
     usdcMint: usdcMint(),
     feePayer,
+    writesLocked: signingLocked(),
   });
 });
 
@@ -91,6 +94,7 @@ export const setupInstitutionChain = asyncHandler(async (req, res) => {
   if (institution.verificationStatus !== "VERIFIED" || institution.status !== "ACTIVE") {
     throw new AppError("Only a verified, active college can be set up on-chain", 409);
   }
+  assertSigningAllowed(); // before anything: Mainnet stays locked until key custody is approved
   if (await CollegeChain.exists({ institutionId: institution._id })) {
     throw new AppError("This college already has an on-chain collection", 409);
   }
