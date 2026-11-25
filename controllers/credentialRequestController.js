@@ -6,6 +6,7 @@ import Nft from "../models/nft.js";
 import Wallet from "../models/wallet.js";
 import CollegeChain from "../models/collegeChain.js";
 import { chain, assertSameNetwork } from "../utils/chain.js";
+import { alertAdmins } from "../services/alertService.js";
 import { buildRecoveryUrl, createActivationToken, STUDENT_INVITE_DAYS } from "../utils/activationToken.js";
 import { trySendTemplateEmail } from "../services/emailService.js";
 import { audit } from "../utils/audit.js";
@@ -289,6 +290,15 @@ const execute = async (req, request, college) => {
   }
   if (ok) ok = request.kind === "RECOVERY" ? await applyRecovery(request) : await applyBurn(request);
   request.status = ok ? "EXECUTED" : "FAILED";
+  if (!ok) {
+    await alertAdmins({
+      key: `request-failed-${request._id}`,
+      subject: `A ${request.kind === "RECOVERY" ? "wallet recovery" : "burn"} failed on-chain`,
+      message: "The officials approved it, but the on-chain step failed. Nothing was lost; it can be retried from the college's Approvals page.",
+      details: `Request ${request._id}: ${request.results.at(-1)?.error || "unknown error"}`,
+      everyMinutes: 1440,
+    });
+  }
   if (ok) request.set({ open: false, executedAt: new Date(), tokenHash: undefined });
   await request.save();
   await audit(req, {

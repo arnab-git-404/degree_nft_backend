@@ -19,6 +19,7 @@ import CollegeChain from "../models/collegeChain.js";
 import BillingEntry from "../models/billingEntry.js";
 import { getBalances, getPrices, pickPayment } from "../services/billingService.js";
 import { chain, assertSameNetwork, FEE_PAYER_MIN_LAMPORTS } from "../utils/chain.js";
+import { alertAdmins } from "../services/alertService.js";
 import { encryptSecret, decryptSecret } from "../utils/secretBox.js";
 import { hasPermission } from "../middleware/auth.js";
 import { findOrCreateUserByWallet } from "../services/userWalletService.js";
@@ -151,7 +152,7 @@ export const resolveCredentialRows = asyncHandler(async (req, res) => {
     results.push({
       row: match.rowNo,
       ...(error && { error }),
-      enrollmentId: enrollment._id,
+      enrollmentId: enrollment?._id,
       studentName: student.fullName,
       registrationNo: student.registrationNo,
       programCode: program.code,
@@ -535,7 +536,20 @@ export const claimCredential = asyncHandler(async (req, res) => {
   if (nft && nft.status === "MINTED") return res.status(200).json({ success: true, nft: publicNft(nft) });
 
   if (!nft) {
-    if ((await chain.feePayerBalance()).lamports < FEE_PAYER_MIN_LAMPORTS) {
+    const fee = await chain.feePayerBalance();
+    if (fee.lamports < FEE_PAYER_MIN_LAMPORTS * 10) {
+      const paused = fee.lamports < FEE_PAYER_MIN_LAMPORTS;
+      await alertAdmins({
+        key: paused ? "fee-payer-paused" : "fee-payer-low",
+        subject: paused ? "Claims are paused: the fee wallet is empty" : "The fee wallet is running low",
+        message: paused
+          ? "Students can't claim credentials until the platform fee wallet is topped up with SOL."
+          : "Top up the platform fee wallet with SOL soon; claims pause when it gets too low.",
+        details: `Fee wallet ${fee.address}: ${fee.lamports / 1e9} SOL (claims pause below ${FEE_PAYER_MIN_LAMPORTS / 1e9} SOL)`,
+        everyMinutes: paused ? 60 : 360,
+      });
+    }
+    if (fee.lamports < FEE_PAYER_MIN_LAMPORTS) {
       throw new AppError("Issuing is paused for a moment: the platform's fee wallet needs topping up. Nothing was charged; please try later.", 503);
     }
     const payment = pickPayment(await getBalances(credential.institutionId), await getPrices());
@@ -580,6 +594,13 @@ export const claimCredential = asyncHandler(async (req, res) => {
       if (!(await chain.getAsset(nft.assetAddress))) {
         nft.status = "FAILED";
         await nft.save();
+        await alertAdmins({
+          key: "mint-failed",
+          subject: "A credential mint failed",
+          message: "A student's claim did not go through on-chain. Nothing was charged and the student can try again; repeated failures usually mean RPC or fee-wallet trouble.",
+          details: `Credential ${credential._id}: ${String(error.message).slice(0, 200)}`,
+          everyMinutes: 60,
+        });
         throw new AppError("Minting did not go through. Nothing was charged; please try again.", 502);
       }
     }

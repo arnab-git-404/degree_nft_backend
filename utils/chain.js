@@ -299,7 +299,8 @@ const real = {
 
     {
       const signatures = await withRpcRetry(() => connection.getSignaturesForAddress(new PublicKey(from), { limit: 100 }));
-      const ok = signatures.filter((entry) => !entry.err && !knownSignatures.has(entry.signature)).map((entry) => entry.signature);
+      // De-duplicated: an RPC that lists a signature twice must not credit that payment twice.
+      const ok = [...new Set(signatures.filter((entry) => !entry.err && !knownSignatures.has(entry.signature)).map((entry) => entry.signature))];
       for (let i = 0; i < ok.length; i += 5) {
         const transactions = await withRpcRetry(() => connection.getParsedTransactions(ok.slice(i, i + 5), { maxSupportedTransactionVersion: 0 }));
         transactions.forEach((transaction, index) => {

@@ -41,6 +41,7 @@ import { pickPayment } from "../services/billingService.js";
 import { toUnits } from "../controllers/chainController.js";
 import PinnedMetadata from "../models/pinnedMetadata.js";
 import { findOrCreateUserByWallet } from "../services/userWalletService.js";
+import { alertAdmins } from "../services/alertService.js";
 
 describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not set" }, () => {
   let server;
@@ -53,7 +54,9 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
   const prepareIssue = async (institution, path, body) => {
     const institutionId = String(institution._id || institution);
     await PinnedMetadata.updateOne({ institutionId, cid: body.ipfsHash }, { $setOnInsert: { sha256: "test" } }, { upsert: true });
-    if (path !== "/institution/credentials" || body.enrollmentId || !body.studentWallet) return body;
+    if (path !== "/institution/credentials") return body; // revise tests check their own links
+    body = { ...body, uri: `https://ipfs.io/ipfs/${body.ipfsHash}` }; // allocation() has a fixed QmSmoke link; tests override only the hash
+    if (body.enrollmentId || !body.studentWallet) return body;
     const { user, wallet } = await findOrCreateUserByWallet(body.studentWallet);
     created.users.push(user._id);
     created.wallets.push(wallet._id);
@@ -156,6 +159,8 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     await Nft.deleteMany({ institutionId: { $in: created.unis } });
     await CredentialRequest.deleteMany({ institutionId: { $in: created.unis } });
     await PinnedMetadata.deleteMany({ institutionId: { $in: created.unis } });
+    // Test alerts must not throttle real alerts in this database.
+    await mongoose.connection.collection("alertsents").deleteMany({ $or: [{ key: { $in: ["fee-payer-paused", "fee-payer-low", "mint-failed"] } }, { key: /^request-failed-/ }] });
     await Institution.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
@@ -1955,6 +1960,17 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.equal(pickPayment({ SOL: 100, USDC: 100 }, { SOL: null, USDC: null }), null); // no price set = cannot mint
     });
 
+    test("alerts: the same alert is sent once, then held back for its quiet period", async () => {
+      const key = `test-alert-${Date.now()}`;
+      try {
+        const first = await alertAdmins({ key, subject: "Test", message: "Test alert", everyMinutes: 60 });
+        assert.notEqual(first, "throttled");
+        assert.equal(await alertAdmins({ key, subject: "Test", message: "Test alert", everyMinutes: 60 }), "throttled");
+      } finally {
+        await mongoose.connection.collection("alertsents").deleteOne({ key });
+      }
+    });
+
     test("only the Super Admin sets the global price", async () => {
       const admin = await makeUser("admin");
       const head = await makeUser("institution");
@@ -2184,6 +2200,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       fakeChain.failNextExecute = true;
       const failed = await w.approveWith(w.secondAdmin, requestId, w.approvers[1], { confirmIrreversible: "true" });
       assert.equal(failed.body.request.status, "FAILED", JSON.stringify(failed.body));
+      assert.ok(await mongoose.connection.collection("alertsents").findOne({ key: `request-failed-${requestId}` })); // alerted once
       assert.ok(fakeChain.assets.has(assetAddress));
       const done = await w.as(w.secondAdmin)("POST", `/institution/credential-requests/${requestId}/retry`);
       assert.equal(done.status, 200, JSON.stringify(done.body));
@@ -2288,6 +2305,7 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       try {
         const paused = await w.claim(credential);
         assert.equal(paused.status, 503);
+        assert.ok(await mongoose.connection.collection("alertsents").findOne({ key: "fee-payer-paused" })); // the Super Admins were alerted
         assert.equal(await Nft.countDocuments({ credentialId: credential._id }), 0);
         assert.equal(await BillingEntry.countDocuments({ institutionId: w.college._id, kind: "CHARGE" }), 0);
         assert.equal((await call("GET", "/admin/settings/billing", { token: w.admin.token })).body.feePayer.low, true);
@@ -2428,6 +2446,76 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       const ok = await issue({ enrollmentId: String(profileEnrollment._id) });
       assert.equal(ok.status, 201, JSON.stringify(ok.body));
       assert.equal(ok.body.credential.studentWallet, w.oldWallet);
+    });
+
+    test("P09-01 regression: one student, two colleges, two courses, several credential types, nothing crosses over", async () => {
+      const admin = await makeUser("admin");
+      const student = await makeUser("student");
+      const setupCollege = async () => {
+        const head = await makeUser("institution");
+        const college = await makeInstitution(head, "VERIFIED");
+        await call("POST", `/admin/institutions/${college._id}/chain`, { token: admin.token, body: chainBody() });
+        fakeChain.deposits.push({ signature: `p09-${college._id}`, currency: "SOL", amount: 1000, from: college.walletAddress });
+        const as = (method, path, body) => call(method, path, { token: head.token, institution: college, body });
+        await as("POST", "/institution/billing/sync");
+        const profile = await Student.create({ institutionId: college._id, fullName: "Rahul Sharma", email: `p09-${college._id}@example.com`, userId: student.user._id });
+        const course = async (code, startYear, endYear) => {
+          const program = (await as("POST", "/institution/programs", { code, name: code })).body.program;
+          const batch = (await as("POST", "/institution/program-sessions", { programId: program._id, startYear, endYear })).body.session;
+          return (await as("POST", "/institution/enrollments", { studentId: profile._id, programSessionId: batch._id })).body.enrollment;
+        };
+        const issue = async (enrollment, credentialType, ipfsHash) => {
+          const response = await as("POST", "/institution/credentials", { ...allocation(student.wallet.address), ipfsHash, credentialType, enrollmentId: String(enrollment._id) });
+          assert.equal(response.status, 201, JSON.stringify(response.body));
+          await Credential.updateOne({ _id: response.body.credential._id }, { isConfirmed: true });
+          return Credential.findById(response.body.credential._id);
+        };
+        return { head, college, as, course, issue };
+      };
+      const abc = await setupCollege();
+      const xyz = await setupCollege();
+
+      const cse = await abc.course("CSE", 2022, 2026);
+      const mba = await abc.course("MBA", 2027, 2029);
+      const abcDegree = await abc.issue(cse, "DEGREE", "QmP09CseDeg");
+      const abcProvisional = await abc.issue(cse, "PROVISIONAL", "QmP09CseProv");
+      const abcMba = await abc.issue(mba, "DEGREE", "QmP09MbaDeg");
+      const xyzDegree = await xyz.issue(await xyz.course("CSE", 2022, 2026), "DEGREE", "QmP09XyzDeg");
+
+      // The student sees all four, from both colleges.
+      const mine = (await call("GET", `/student/credentials/next/${student.wallet.address}`, { token: student.token })).body.credentials;
+      assert.equal(mine.length, 4);
+      assert.deepEqual(new Set(mine.map((credential) => credential.credentialType)), new Set(["DEGREE", "PROVISIONAL"]));
+
+      // Each college sees only its own credentials.
+      const abcList = (await abc.as("GET", "/institution/credentials")).body.credentials.map((credential) => credential._id);
+      assert.deepEqual(abcList.sort(), [abcDegree, abcProvisional, abcMba].map((credential) => String(credential._id)).sort());
+      assert.deepEqual((await xyz.as("GET", "/institution/credentials")).body.credentials.map((credential) => credential._id), [String(xyzDegree._id)]);
+
+      // XYZ cannot change, revoke or burn ABC's credential, nor issue on ABC's enrollment.
+      assert.equal((await xyz.as("POST", `/institution/credentials/${abcDegree._id}/status`, { status: "REVOKED", reason: "Not ours" })).status, 404);
+      assert.equal((await xyz.as("POST", `/institution/credentials/${abcDegree._id}/burn`, { reason: "Not ours" })).status, 404);
+      assert.equal((await xyz.as("POST", "/institution/credentials", { ...allocation(student.wallet.address), ipfsHash: "QmP09Steal", enrollmentId: String(cse._id) })).status, 404);
+
+      // Claiming all four: each in its own college's collection, each college charged only for its own.
+      const claim = (credential) =>
+        call("POST", "/student/credentials/claim", { token: student.token, body: { walletAddress: student.wallet.address, credentialId: String(credential._id), revision: credential.revision } });
+      for (const credential of [abcDegree, abcProvisional, abcMba, xyzDegree]) assert.equal((await claim(credential)).status, 200);
+      const collectionOf = async (college) => (await CollegeChain.findOne({ institutionId: college._id })).collectionAddress;
+      const nfts = await Nft.find({ credentialId: { $in: [abcDegree, abcProvisional, abcMba, xyzDegree].map((credential) => credential._id) } });
+      const abcCollection = await collectionOf(abc.college);
+      const xyzCollection = await collectionOf(xyz.college);
+      assert.equal(nfts.filter((nft) => nft.collectionAddress === abcCollection).length, 3);
+      assert.equal(nfts.filter((nft) => nft.collectionAddress === xyzCollection).length, 1);
+      assert.equal(await BillingEntry.countDocuments({ institutionId: abc.college._id, kind: "CHARGE" }), 3);
+      assert.equal(await BillingEntry.countDocuments({ institutionId: xyz.college._id, kind: "CHARGE" }), 1);
+
+      // Revoking ABC's provisional changes only that one.
+      await abc.as("POST", `/institution/credentials/${abcProvisional._id}/status`, { status: "REVOKED", reason: "Superseded by the degree" });
+      const verify = async (credential) => (await call("GET", `/verify/${(await Credential.findById(credential._id)).nftAddress}`)).body.status;
+      assert.equal(await verify(abcProvisional), "REVOKED");
+      assert.equal(await verify(abcDegree), "VERIFIED");
+      assert.equal(await verify(xyzDegree), "VERIFIED");
     });
 
     test("a request can be rejected with a reason, and then nothing happens", async () => {

@@ -28,6 +28,10 @@ import BillingEntry from "../models/billingEntry.js";
 import Nft from "../models/nft.js";
 import CredentialRequest from "../models/credentialRequest.js";
 import PlatformSetting from "../models/platformSetting.js";
+import Program from "../models/program.js";
+import ProgramSession from "../models/programSession.js";
+import Enrollment from "../models/enrollment.js";
+import PinnedMetadata from "../models/pinnedMetadata.js";
 import AuditLog from "../models/auditLog.js";
 
 const enabled = process.env.DEVNET_E2E === "true";
@@ -82,7 +86,7 @@ describe("Devnet end-to-end through the API (Phase 4)", { skip: !enabled && "set
   after(async () => {
     await PlatformSetting.updateOne({ key: "platform" }, savedBilling ? { $set: { billing: savedBilling } } : { $unset: { billing: 1 } });
     const unis = { institutionId: { $in: created.unis } };
-    for (const model of [Credential, CollegeChain, BillingEntry, Nft, CredentialRequest, Student, InstitutionMembership, AuditLog]) await model.deleteMany(unis);
+    for (const model of [Credential, CollegeChain, BillingEntry, Nft, CredentialRequest, Student, InstitutionMembership, AuditLog, Program, ProgramSession, Enrollment, PinnedMetadata]) await model.deleteMany(unis);
     await Institution.deleteMany({ _id: { $in: created.unis } });
     await Wallet.deleteMany({ _id: { $in: created.wallets } });
     await User.deleteMany({ _id: { $in: created.users } });
@@ -153,7 +157,13 @@ describe("Devnet end-to-end through the API (Phase 4)", { skip: !enabled && "set
     record("college payment credited", { signature: paySig, lamports: 2_000_000 });
 
     // 3. Issue, confirm, claim: the backend mints into the student's wallet; the college is charged once.
-    const issued = await as(head)("POST", "/institution/credentials", { studentWallet: student.wallet.address, name: "B.Tech (E2E)", symbol: "DEG", uri: "https://example.com/e2e.json", ipfsHash: `QmE2E${Date.now()}` });
+    // The student's enrollment, and the metadata as if pinned through DegreeNFT (Pinata itself is not part of this test).
+    const program = await Program.create({ institutionId: college._id, code: "E2E", name: "E2E Program" });
+    const batch = await ProgramSession.create({ institutionId: college._id, programId: program._id, startYear: 2022, endYear: 2026, code: "E2E-2022" });
+    const enrollment = await Enrollment.create({ institutionId: college._id, studentId: profile._id, programSessionId: batch._id, programId: program._id });
+    const ipfsHash = `QmE2E${Date.now()}`;
+    await PinnedMetadata.create({ institutionId: college._id, cid: ipfsHash, sha256: "e2e" });
+    const issued = await as(head)("POST", "/institution/credentials", { enrollmentId: String(enrollment._id), name: "B.Tech (E2E)", symbol: "DEG", uri: `https://ipfs.io/ipfs/${ipfsHash}`, ipfsHash });
     assert.equal(issued.status, 201, JSON.stringify(issued.body));
     const credentialId = issued.body.credential?._id || (await Credential.findOne({ institutionId: college._id }))._id;
     await Credential.updateOne({ _id: credentialId }, { studentId: profile._id, isConfirmed: true });
