@@ -8,7 +8,7 @@ import nacl from "tweetnacl";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { Keypair } from "@solana/web3.js";
-import app from "../app.js";
+import app, { allowedOrigins } from "../app.js";
 import seedRoles from "../utils/seedRoles.js";
 import { signToken } from "../utils/jwt.js";
 import User from "../models/user.js";
@@ -1958,6 +1958,13 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
       assert.deepEqual(pickPayment({ SOL: 100, USDC: 1 }, prices), { currency: "SOL", amount: 10 });
       assert.equal(pickPayment({ SOL: 9, USDC: 1 }, prices), null);
       assert.equal(pickPayment({ SOL: 100, USDC: 100 }, { SOL: null, USDC: null }), null); // no price set = cannot mint
+    });
+
+    test("CORS: only the configured frontend may call the API from a browser", { skip: !allowedOrigins.length && "no CORS_ORIGINS / FRONTEND_URL in .env" }, async () => {
+      const preflight = (origin) =>
+        fetch(`${base}/verify/11111111111111111111111111111111`, { method: "OPTIONS", headers: { origin, "access-control-request-method": "GET" } });
+      assert.equal((await preflight(allowedOrigins[0])).headers.get("access-control-allow-origin"), allowedOrigins[0]);
+      assert.equal((await preflight("https://evil.example")).headers.get("access-control-allow-origin"), null);
     });
 
     test("alerts: the same alert is sent once, then held back for its quiet period", async () => {
