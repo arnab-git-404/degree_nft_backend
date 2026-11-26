@@ -11,14 +11,14 @@ const StudentDetailsSchema = new mongoose.Schema({
     required: true,
     trim: true,
   },
-  studentId: {
+  userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     index: true,
   },
-  universityId: {
+  institutionId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "University",
+    ref: "Institution",
     index: true,
   },
   studentWalletId: {
@@ -26,7 +26,7 @@ const StudentDetailsSchema = new mongoose.Schema({
     ref: "Wallet",
     index: true,
   },
-  universityWalletId: {
+  institutionWalletId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Wallet",
     index: true,
@@ -35,12 +35,12 @@ const StudentDetailsSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
-  universityWalletAddress: {
+  institutionWalletAddress: {
     type: String,
     required: true,
     trim: true,
   },
-  universityName: {
+  institutionName: {
     type: String,
     required: true,
     trim: true,

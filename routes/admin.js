@@ -1,41 +1,66 @@
 import express from "express";
 import * as adminController from "../controllers/adminController.js";
-import {
-  protect,
-  authorize,
-  requirePermission,
-} from "../middleware/auth.js";
+import * as registrationController from "../controllers/registrationController.js";
+import * as settingsController from "../controllers/settingsController.js";
+import * as chainController from "../controllers/chainController.js";
+import { protect, requirePermission } from "../middleware/auth.js";
 
 const router = express.Router();
 
-router.use(protect, authorize("admin"));
+router.use(protect, requirePermission("platform:manage"));
 
 router.get("/stats", adminController.getDashboardStats);
+
+router.get("/settings/smtp", settingsController.getSmtpSettings);
+router.put("/settings/smtp", settingsController.updateSmtpSettings);
+router.post("/settings/smtp/test", settingsController.testSmtpSettings);
+router.get("/settings/billing", chainController.getBillingSettings);
+router.put("/settings/billing", chainController.updateBillingSettings);
 
 router.get("/permissions", adminController.getPermissionCatalog);
 router.get("/roles", adminController.getRoles);
 router.post("/roles", adminController.createRole);
 router.get("/roles/:roleId/users", adminController.getRoleUsers);
 router.patch("/roles/:roleId", adminController.updateRole);
-router.delete("/roles/:roleId", adminController.deleteRole);
 
 router.get("/users", adminController.getUsers);
 router.patch("/users/:userId/role", adminController.updateUserRole);
+router.patch("/users/:userId/account", adminController.updateUserAccount);
 router.patch("/users/:userId/status", adminController.updateUserStatus);
 
-router.get("/universities", adminController.getUniversities);
+router.get("/institutions", adminController.getInstitutions);
 router.patch(
-  "/universities/:universityId/status",
-  adminController.updateUniversityStatus
+  "/institutions/:institutionId/status",
+  adminController.updateInstitutionStatus
 );
+router.get("/institutions/:institutionId/members", adminController.getInstitutionMembers);
+router.post("/institutions/:institutionId/members", adminController.inviteInstitutionMember);
+router.patch("/institutions/:institutionId/members/:membershipId", adminController.updateInstitutionMember);
+router.post("/institutions/:institutionId/head", adminController.transferInstitutionHead);
+router.get("/institutions/:institutionId/chain", chainController.getInstitutionChain);
+router.post("/institutions/:institutionId/chain", chainController.setupInstitutionChain);
 
-router.get("/nfts", adminController.getNftAllocations);
+router.get("/credentials", adminController.listCredentials);
+
+router.get("/audit-logs", adminController.getAuditLogs);
+
+router.get("/applications", adminController.getApplications);
+router.post("/applications/:applicationId/approve", registrationController.approveApplication);
+router.post("/applications/:applicationId/reject", registrationController.rejectApplication);
+
+router.get("/registration-links", registrationController.getRegistrationLinks);
+router.post("/registration-links", registrationController.createRegistrationLink);
+router.patch(
+  "/registration-links/:linkId",
+  registrationController.updateRegistrationLink
+);
 
 router.get(
   "/reports",
   requirePermission("report:read"),
   adminController.getReports
 );
+
 router.patch(
   "/reports/:reportId/resolve",
   requirePermission("report:resolve"),

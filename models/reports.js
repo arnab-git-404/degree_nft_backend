@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 
 const ReportSchema = new mongoose.Schema({
-  universityWallet: {
+  institutionWallet: {
     type: String,
     required: true,
   },
@@ -9,17 +9,17 @@ const ReportSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  universityId: {
+  institutionId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "University",
+    ref: "Institution",
     index: true,
   },
-  studentId: {
+  userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     index: true,
   },
-  universityWalletId: {
+  institutionWalletId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Wallet",
     index: true,
@@ -29,7 +29,9 @@ const ReportSchema = new mongoose.Schema({
     ref: "Wallet",
     index: true,
   },
-  nftIpfsHash: {
+  // The credential this report is about. Stays valid when the credential is revised (its ipfsHash changes).
+  credentialId: { type: mongoose.Schema.Types.ObjectId, ref: "Credential", index: true },
+  ipfsHash: {
     type: String,
     required: true,
   },
@@ -57,4 +59,4 @@ const ReportSchema = new mongoose.Schema({
   },
 });
 
-export default mongoose.model("NFT Reports", ReportSchema);
+export default mongoose.model("Report", ReportSchema);

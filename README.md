@@ -52,12 +52,12 @@ Here are the main API routes provided by the server:
 
 | Method | Endpoint | Description | 
 | :----- | :----- | :----- | 
-| `POST` | `/api/create-nft-ipfsHash-allocation` | Creates a new NFT allocation for a student. (University Only) | 
-| `GET` | `/api/check-authorization/:walletAddress` | Checks if a student wallet is authorized to mint a credential. | 
-| `POST` | `/api/confirm-nft-credential` | Allows a student to confirm their credential details are correct. | 
-| `POST` | `/api/confirm-mint` | Marks a credential as minted after on-chain confirmation. | 
-| `GET` | `/api/minted-nfts/:walletAddress` | Retrieves all minted NFTs associated with a student wallet. | 
-| `POST` | `/api/report-issue` | Submits an issue report from a student to their university. | 
+| `POST` | `/api/institution/credentials` | Issues a credential for a student enrollment. (College staff) | 
+| `GET` | `/api/student/credentials/next/:walletAddress` | Returns the student's next credential to review or mint. | 
+| `POST` | `/api/student/credentials/confirm` | Student confirms one credential (by id and revision). | 
+| `POST` | `/api/student/credentials/mint` | Records a mint after the server verifies it on-chain. | 
+| `GET` | `/api/student/credentials/minted/:walletAddress` | Lists the student's minted credentials. | 
+| `POST` | `/api/student/credentials/report` | Student reports an issue with one credential. | 
 
 ## 📁 Project Structure
 ```

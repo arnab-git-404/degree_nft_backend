@@ -1,8 +1,11 @@
+import { audit, auditFailures } from "../utils/audit.js";
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
-import User from "../models/user.js";
-import Role from "../models/role.js";
+import User, { SUPER_ADMIN_ACCOUNT } from "../models/user.js";
+import InstitutionMembership from "../models/institutionMembership.js";
 import Wallet from "../models/wallet.js";
+import Student from "../models/student.js";
+import CredentialRequest from "../models/credentialRequest.js";
 import AuthNonce from "../models/authNonce.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
@@ -31,16 +34,6 @@ const getAdminWalletAddresses = () =>
     .flatMap((value) => String(value).split(","))
     .map((address) => address.trim())
     .filter(Boolean);
-
-const findRole = async (name) => {
-  const role = await Role.findOne({ name, isActive: true });
-
-  if (!role) {
-    throw new AppError(`Role '${name}' is not configured`, 500);
-  }
-
-  return role;
-};
 
 const consumeNonce = async ({
   walletAddress,
@@ -74,10 +67,18 @@ const consumeNonce = async ({
     throw new AppError("Invalid wallet signature", 401);
   }
 
-  nonceDoc.used = true;
-  await nonceDoc.save();
+  // Atomic claim: two concurrent requests replaying one signature cannot both succeed.
+  const claimed = await AuthNonce.findOneAndUpdate(
+    { _id: nonceDoc._id, used: false },
+    { used: true },
+    { new: true }
+  );
 
-  return nonceDoc;
+  if (!claimed) {
+    throw new AppError("Invalid wallet signature", 401);
+  }
+
+  return claimed;
 };
 
 const populateUser = async (user) => {
@@ -85,8 +86,17 @@ const populateUser = async (user) => {
     { path: "roleId" },
     { path: "wallets" },
     { path: "primaryWallet" },
-    { path: "university" },
+    { path: "institution" },
     { path: "studentProfiles" },
+    {
+      // Colleges this user can switch to; the server re-checks each request in requireInstitution.
+      path: "memberships",
+      match: { status: "ACTIVE" },
+      populate: [
+        { path: "institutionId", select: "name code status verificationStatus" },
+        { path: "roleId", select: "name displayName permissions scope isActive" },
+      ],
+    },
   ]);
 
   return user;
@@ -151,7 +161,7 @@ export const requestNonce = asyncHandler(async (req, res) => {
   });
 });
 
-export const walletLogin = asyncHandler(async (req, res) => {
+export const walletLogin = asyncHandler(auditFailures("auth.login.wallet", "ACCOUNT", (req) => ({ details: { walletAddress: req.body?.walletAddress } }))(async (req, res) => {
   const {
     walletAddress,
     signature,
@@ -169,13 +179,26 @@ export const walletLogin = asyncHandler(async (req, res) => {
 
   await consumeNonce({ walletAddress, signature, signatureEncoding });
 
-  const roleName = getAdminWalletAddresses().includes(walletAddress)
-    ? "admin"
-    : undefined;
+  const isAdminWallet = getAdminWalletAddresses().includes(walletAddress);
+
+  // No self-signup: only wallets already on an account (or configured admin wallets) may sign in.
+  if (
+    !isAdminWallet &&
+    !(await Wallet.exists({ chain: "solana", address: walletAddress }))
+  ) {
+    throw new AppError(
+      "This wallet is not registered with DegreeNFT.",
+      403,
+      "WALLET_NOT_REGISTERED"
+    );
+  }
+
+  const roleName = isAdminWallet ? "admin" : undefined;
   const { user, wallet } = await findOrCreateUserByWallet(walletAddress, {
     name,
     verified: true,
     roleName,
+    account: isAdminWallet ? SUPER_ADMIN_ACCOUNT : undefined,
   });
 
   if (!user.isActive) {
@@ -188,63 +211,118 @@ export const walletLogin = asyncHandler(async (req, res) => {
   await populateUser(user);
 
   if (!user.roleId?.isActive) {
-    throw new AppError("Your assigned role is inactive", 403);
+    throw new AppError("Your access has been revoked: your role is inactive", 403, "ACCESS_REVOKED");
   }
+
+  await audit(req, { action: "auth.login.wallet", scope: "ACCOUNT", actor: user, targetType: "Wallet", targetId: wallet._id, summary: `Signed in with wallet ${walletAddress}` });
 
   res.status(200).json({
     success: true,
     token: signToken(user),
     user: user.toJSON(),
   });
+}));
+
+// The student behind an emailed wallet-invite link, or a plain 400 when it is wrong, used or expired.
+const findStudentInvite = async (token) => {
+  const student = await Student.findOne({
+    inviteTokenHash: hashActivationToken(token),
+    inviteExpiresAt: { $gt: new Date() },
+    userId: null,
+  })
+    .select("+inviteTokenHash")
+    .populate("institutionId", "name code status");
+
+  if (!student || student.institutionId?.status !== "ACTIVE" || student.studentStatus !== "ACTIVE") {
+    throw new AppError("This invite link is invalid or has expired. Ask your college to send a new one.", 400, "INVALID_INVITE");
+  }
+
+  return student;
+};
+
+// Public: what the claim page shows before the student connects a wallet.
+export const getStudentInvite = asyncHandler(async (req, res) => {
+  const student = await findStudentInvite(req.params.token);
+
+  res.status(200).json({
+    success: true,
+    invite: {
+      studentName: student.fullName,
+      registrationNo: student.registrationNo || null,
+      collegeName: student.institutionId.name,
+      walletHint: student.walletHint || null,
+      expiresAt: student.inviteExpiresAt,
+    },
+  });
 });
 
-export const register = asyncHandler(async (req, res) => {
-  const { name, email, password } = req.body;
-  const roleName = req.body.role || "student";
+/**
+ * Public: the student signs the challenge with their wallet. That proves they hold it, so the wallet is
+ * saved (verified) on their account and the college's profile is linked to that account. Signs them in.
+ * The link is single-use; the wallet the college guessed (walletHint) is never trusted, only the signed one.
+ */
+export const claimStudentInvite = asyncHandler(auditFailures("student.claim", "ACCOUNT", (req) => ({ details: { walletAddress: req.body?.walletAddress } }))(async (req, res) => {
+  const { walletAddress, signature, signatureEncoding = "base64" } = req.body;
 
-  if (!name || !email || !password) {
-    throw new AppError("name, email and password are required", 400);
+  if (!walletAddress || !signature) {
+    throw new AppError("walletAddress and signature are required", 400);
   }
 
-  if (!/^\S+@\S+\.\S+$/.test(email)) {
-    throw new AppError("Please provide a valid email address", 400);
+  if (!isValidSolanaAddress(walletAddress)) {
+    throw new AppError("Invalid Solana wallet address", 400);
   }
 
-  if (String(password).length < 8) {
-    throw new AppError("Password must be at least 8 characters long", 400);
+  const student = await findStudentInvite(req.params.token);
+  await consumeNonce({ walletAddress, signature, signatureEncoding });
+
+  const { user, wallet } = await findOrCreateUserByWallet(walletAddress, { name: student.fullName, verified: true });
+
+  if (!user.isActive) {
+    throw new AppError("User account is inactive", 403);
   }
 
-  if (!["student", "university"].includes(roleName)) {
-    throw new AppError("role must be either student or university", 400);
+  // The link went to the student's email, so that address counts as verified unless another account already uses it.
+  if (!user.email && !(await User.exists({ email: student.email, _id: { $ne: user._id } }))) {
+    user.email = student.email;
+    user.emailVerified = true;
   }
 
-  const normalizedEmail = normalizeEmail(email);
-  const existingUser = await User.findOne({ email: normalizedEmail });
+  // Atomic: two people racing on one link cannot both win.
+  const claimed = await Student.findOneAndUpdate(
+    { _id: student._id, userId: null, inviteTokenHash: student.inviteTokenHash },
+    { $set: { userId: user._id, claimedAt: new Date() }, $unset: { inviteTokenHash: "", inviteExpiresAt: "" } }
+  );
 
-  if (existingUser) {
-    throw new AppError("Email is already registered", 409);
+  if (!claimed) {
+    throw new AppError("This invite has already been used.", 409, "INVALID_INVITE");
   }
 
-  const role = await findRole(roleName);
-  const passwordHash = await bcrypt.hash(password, 12);
-  const user = await User.create({
-    name: String(name).trim(),
-    email: normalizedEmail,
-    passwordHash,
-    roleId: role._id,
-  });
-
-  const activation = await issueActivation(user);
+  await backfillWalletReferences(user._id, wallet);
+  user.lastLoginAt = new Date();
+  await user.save();
   await populateUser(user);
 
-  res.status(201).json({
-    success: true,
-    message:
-      "Account created. We sent an activation link to your email address.",
-    user: user.toJSON(),
-    ...activationPayload(activation),
+  if (!user.roleId?.isActive) {
+    throw new AppError("Your access has been revoked: your role is inactive", 403, "ACCESS_REVOKED");
+  }
+
+  await audit(req, {
+    action: "student.claim",
+    scope: "INSTITUTION",
+    actor: user,
+    institutionId: student.institutionId._id,
+    targetType: "Student",
+    targetId: student._id,
+    summary: `${student.fullName} linked wallet ${walletAddress}`,
+    details: { walletAddress, matchedHint: !student.walletHint || student.walletHint === walletAddress },
   });
-});
+
+  res.status(200).json({
+    success: true,
+    token: signToken(user),
+    user: user.toJSON(),
+  });
+}));
 
 export const activateAccount = asyncHandler(async (req, res) => {
   const token = req.params.token || req.body.token;
@@ -271,7 +349,13 @@ export const activateAccount = asyncHandler(async (req, res) => {
   user.activationExpiresAt = null;
   user.lastLoginAt = new Date();
   await user.save();
+  // Accepting the invite: the one-time link proves the invited person, so their college invites become ACTIVE.
+  await InstitutionMembership.updateMany(
+    { userId: user._id, status: "INVITED" },
+    { status: "ACTIVE", acceptedAt: new Date() }
+  );
   await populateUser(user);
+  await audit(req, { action: "auth.account.activate", scope: "ACCOUNT", actor: user, targetType: "User", targetId: user._id, summary: "Activated account" });
 
   res.status(200).json({
     success: true,
@@ -305,7 +389,7 @@ export const resendActivation = asyncHandler(async (req, res) => {
   });
 });
 
-export const login = asyncHandler(async (req, res) => {
+export const login = asyncHandler(auditFailures("auth.login.email", "ACCOUNT", (req) => ({ details: { email: String(req.body?.email || "").slice(0, 200) } }))(async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -331,7 +415,7 @@ export const login = asyncHandler(async (req, res) => {
   }
 
   if (!user.roleId?.isActive) {
-    throw new AppError("Your assigned role is inactive", 403);
+    throw new AppError("Your access has been revoked: your role is inactive", 403, "ACCESS_REVOKED");
   }
 
   if (!user.emailVerified) {
@@ -345,13 +429,14 @@ export const login = asyncHandler(async (req, res) => {
   user.lastLoginAt = new Date();
   await user.save();
   await populateUser(user);
+  await audit(req, { action: "auth.login.email", scope: "ACCOUNT", actor: user, targetType: "User", targetId: user._id, summary: "Signed in with email" });
 
   res.status(200).json({
     success: true,
     token: signToken(user),
     user: user.toJSON(),
   });
-});
+}));
 
 export const getMe = asyncHandler(async (req, res) => {
   await populateUser(req.user);
@@ -420,6 +505,7 @@ export const linkWallet = asyncHandler(async (req, res) => {
   await wallet.save();
   await backfillWalletReferences(req.user._id, wallet);
   await populateUser(req.user);
+  await audit(req, { action: "account.wallet.link", scope: "ACCOUNT", targetType: "Wallet", targetId: wallet._id, summary: `Linked wallet ${wallet.address}` });
 
   res.status(200).json({
     success: true,
@@ -446,6 +532,7 @@ export const setPrimaryWallet = asyncHandler(async (req, res) => {
   wallet.isPrimary = true;
   await wallet.save();
   await populateUser(req.user);
+  await audit(req, { action: "account.wallet.primary", scope: "ACCOUNT", targetType: "Wallet", targetId: wallet._id, summary: `Set primary wallet ${wallet.address}` });
 
   res.status(200).json({
     success: true,
@@ -493,6 +580,7 @@ export const unlinkWallet = asyncHandler(async (req, res) => {
 
   await wallet.deleteOne();
   await populateUser(req.user);
+  await audit(req, { action: "account.wallet.unlink", scope: "ACCOUNT", targetType: "Wallet", targetId: wallet._id, summary: `Unlinked wallet ${wallet.address}` });
 
   res.status(200).json({
     success: true,
@@ -525,6 +613,7 @@ export const updateProfile = asyncHandler(async (req, res) => {
   Object.assign(req.user, updates);
   await req.user.save();
   await populateUser(req.user);
+  await audit(req, { action: "account.profile.update", scope: "ACCOUNT", targetType: "User", targetId: req.user._id, summary: "Updated profile", details: { fields: Object.keys(updates) } });
 
   res.status(200).json({
     success: true,
@@ -562,9 +651,80 @@ export const changePassword = asyncHandler(async (req, res) => {
 
   user.passwordHash = await bcrypt.hash(String(newPassword), 12);
   await user.save();
+  await audit(req, { action: "account.password.change", scope: "ACCOUNT", targetType: "User", targetId: user._id, summary: "Changed password" });
 
   res.status(200).json({
     success: true,
     message: "Password updated successfully",
   });
 });
+
+// ---------------------------------------------------------------- wallet recovery (public, from the emailed link)
+
+const findRecovery = async (token) => {
+  const request = await CredentialRequest.findOne({
+    tokenHash: hashActivationToken(token),
+    tokenExpiresAt: { $gt: new Date() },
+    kind: "RECOVERY",
+    status: "WAITING_FOR_WALLET",
+  })
+    .select("+tokenHash")
+    .populate("institutionId", "name status")
+    .populate("studentId", "fullName registrationNo");
+  if (!request || request.institutionId?.status !== "ACTIVE") {
+    throw new AppError("This recovery link is invalid or has expired. Ask your college to start again.", 400, "INVALID_RECOVERY");
+  }
+  return request;
+};
+
+// Public: what the recovery page shows before the student connects the new wallet.
+export const getRecovery = asyncHandler(async (req, res) => {
+  const request = await findRecovery(req.params.token);
+  res.status(200).json({
+    success: true,
+    recovery: {
+      studentName: request.studentId?.fullName,
+      registrationNo: request.studentId?.registrationNo || null,
+      collegeName: request.institutionId.name,
+      expiresAt: request.tokenExpiresAt,
+    },
+  });
+});
+
+/**
+ * Public: the student signs the challenge with the NEW wallet, proving they hold it. Nothing moves yet:
+ * two college officials still have to approve. The old wallet is not needed (it was lost).
+ */
+export const proveRecoveryWallet = asyncHandler(auditFailures("credential.recovery.prove", "ACCOUNT", (req) => ({ details: { walletAddress: req.body?.walletAddress } }))(async (req, res) => {
+  const { walletAddress, signature, signatureEncoding = "base64" } = req.body;
+  if (!walletAddress || !signature) throw new AppError("walletAddress and signature are required", 400);
+  if (!isValidSolanaAddress(walletAddress)) throw new AppError("Invalid Solana wallet address", 400);
+
+  const request = await findRecovery(req.params.token);
+  await consumeNonce({ walletAddress, signature, signatureEncoding });
+  if (await Wallet.exists({ address: walletAddress, userId: request.fromUserId })) {
+    throw new AppError("That is the wallet being replaced. Connect your new wallet.", 409);
+  }
+  const { user } = await findOrCreateUserByWallet(walletAddress, { name: request.studentId?.fullName, verified: true });
+  if (!user.isActive) throw new AppError("That wallet's account is inactive", 403);
+
+  // Atomic: the link works once.
+  const updated = await CredentialRequest.findOneAndUpdate(
+    { _id: request._id, status: "WAITING_FOR_WALLET", tokenHash: request.tokenHash },
+    { $set: { status: "PENDING_APPROVAL", toWallet: walletAddress, toUserId: user._id, walletProvedAt: new Date() }, $unset: { tokenHash: "", tokenExpiresAt: "" } },
+    { new: true },
+  );
+  if (!updated) throw new AppError("This recovery link has already been used.", 409, "INVALID_RECOVERY");
+
+  await audit(req, {
+    action: "credential.recovery.prove",
+    scope: "INSTITUTION",
+    actor: user,
+    institutionId: request.institutionId._id,
+    targetType: "CredentialRequest",
+    targetId: request._id,
+    summary: `${request.studentId?.fullName} proved new wallet ${walletAddress}`,
+    details: { walletAddress },
+  });
+  res.status(200).json({ success: true, message: "New wallet confirmed. Your college will now approve the move." });
+}));

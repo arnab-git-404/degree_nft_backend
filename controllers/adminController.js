@@ -1,9 +1,15 @@
+import { audit } from "../utils/audit.js";
 import mongoose from "mongoose";
-import User from "../models/user.js";
-import Role from "../models/role.js";
-import University from "../models/university.js";
-import NFT from "../models/nft.js";
+import User, { USER_TYPES } from "../models/user.js";
+import Role, { ROLE_SCOPES } from "../models/role.js";
+import Institution from "../models/institution.js";
+import { INSTITUTION_STATUSES } from "../models/institution.js";
+import Credential from "../models/credential.js";
 import Reports from "../models/reports.js";
+import InstitutionApplication from "../models/institutionApplication.js";
+import InstitutionMembership from "../models/institutionMembership.js";
+import * as staffService from "../services/staffService.js";
+import { listAuditLogs } from "../services/auditService.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import {
@@ -62,6 +68,9 @@ const serializeRole = (role, userCount = 0) => {
     displayName: value.displayName,
     description: value.description || "",
     permissions: value.permissions || [],
+    scope: value.scope || "PLATFORM",
+    // A college's own role: { _id, name, code } when populated, else the id; null = shared.
+    institution: value.institutionId || null,
     isSystem: Boolean(value.isSystem),
     isActive: Boolean(value.isActive),
     userCount,
@@ -70,16 +79,23 @@ const serializeRole = (role, userCount = 0) => {
   };
 };
 
+// Holders of a role: accounts for PLATFORM roles, college memberships for INSTITUTION roles.
 const getRoleUserCounts = async (roleIds) => {
   if (!roleIds.length) return new Map();
 
-  const counts = await User.aggregate([
-    { $match: { roleId: { $in: roleIds } } },
-    { $group: { _id: "$roleId", count: { $sum: 1 } } },
-  ]);
-
-  return new Map(counts.map((entry) => [String(entry._id), entry.count]));
+  const group = [{ $match: { roleId: { $in: roleIds } } }, { $group: { _id: "$roleId", count: { $sum: 1 } } }];
+  const [users, members] = await Promise.all([User.aggregate(group), InstitutionMembership.aggregate(group)]);
+  const counts = new Map();
+  for (const entry of [...users, ...members]) {
+    counts.set(String(entry._id), (counts.get(String(entry._id)) || 0) + entry.count);
+  }
+  return counts;
 };
+
+const countRoleHolders = (role) =>
+  role.scope === "INSTITUTION"
+    ? InstitutionMembership.countDocuments({ roleId: role._id })
+    : User.countDocuments({ roleId: role._id });
 
 const getPagination = (query) => {
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
@@ -102,9 +118,9 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
   const [
     totalUsers,
     activeUsers,
-    totalUniversities,
-    pendingUniversities,
-    verifiedUniversities,
+    totalInstitutions,
+    pendingInstitutions,
+    verifiedInstitutions,
     totalAllocations,
     totalMinted,
     totalReports,
@@ -112,11 +128,11 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
   ] = await Promise.all([
     User.countDocuments(),
     User.countDocuments({ isActive: true }),
-    University.countDocuments(),
-    University.countDocuments({ verificationStatus: "PENDING" }),
-    University.countDocuments({ verificationStatus: "VERIFIED" }),
-    NFT.countDocuments({ allocated: true }),
-    NFT.countDocuments({ minted: true }),
+    Institution.countDocuments(),
+    Institution.countDocuments({ verificationStatus: "PENDING" }),
+    Institution.countDocuments({ verificationStatus: "VERIFIED" }),
+    Credential.countDocuments({ allocated: true }),
+    Credential.countDocuments({ minted: true }),
     Reports.countDocuments(),
     Reports.countDocuments({ resolved: false }),
   ]);
@@ -126,9 +142,9 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
     stats: {
       totalUsers,
       activeUsers,
-      totalUniversities,
-      pendingUniversities,
-      verifiedUniversities,
+      totalInstitutions,
+      pendingInstitutions,
+      verifiedInstitutions,
       totalAllocations,
       totalMinted,
       totalReports,
@@ -140,6 +156,7 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
 export const getRoles = asyncHandler(async (req, res) => {
   const includeInactive = req.query.includeInactive === "true";
   const roles = await Role.find(includeInactive ? {} : { isActive: true })
+    .populate("institutionId", "name code")
     .sort({ isSystem: -1, name: 1 })
     .lean();
   const counts = await getRoleUserCounts(roles.map((role) => role._id));
@@ -201,6 +218,12 @@ export const createRole = asyncHandler(async (req, res) => {
   const description = String(req.body.description || "").trim();
   const permissions = normalizePermissions(req.body.permissions || []);
   const isActive = req.body.isActive ?? true;
+  // Fixed at creation: PLATFORM roles go on accounts, INSTITUTION roles on college memberships.
+  const scope = req.body.scope ?? "PLATFORM";
+
+  if (!ROLE_SCOPES.includes(scope)) {
+    throw new AppError("scope must be PLATFORM or INSTITUTION", 400);
+  }
 
   if (!ROLE_NAME_PATTERN.test(name)) {
     throw new AppError(
@@ -229,8 +252,10 @@ export const createRole = asyncHandler(async (req, res) => {
     description,
     permissions,
     isActive,
+    scope,
     isSystem: false,
   });
+  await audit(req, { action: "admin.role.create", targetType: "Role", targetId: role._id, summary: `Created role ${role.name}`, details: { permissions: role.permissions } });
 
   res.status(201).json({
     success: true,
@@ -292,15 +317,9 @@ export const updateRole = asyncHandler(async (req, res) => {
         throw new AppError("System roles cannot be deactivated", 400);
       }
 
-      const assignedUsers = await User.countDocuments({ roleId: role._id });
-
-      if (assignedUsers > 0) {
-        throw new AppError(
-          `Reassign ${assignedUsers} user${
-            assignedUsers === 1 ? "" : "s"
-          } before deactivating this role`,
-          400
-        );
+      // People holding an inactive role lose access (they see the "access revoked" page), but never the person doing this.
+      if (req.user.roleId?._id?.equals(role._id)) {
+        throw new AppError("You hold this role; deactivating it would lock you out", 409);
       }
     }
 
@@ -308,44 +327,13 @@ export const updateRole = asyncHandler(async (req, res) => {
   }
 
   await role.save();
+  await audit(req, { action: "admin.role.update", targetType: "Role", targetId: role._id, summary: `Updated role ${role.name}`, details: { changed: Object.keys(req.body || {}), permissions: role.permissions, isActive: role.isActive } });
 
-  const userCount = await User.countDocuments({ roleId: role._id });
+  const userCount = await countRoleHolders(role);
 
   res.status(200).json({
     success: true,
     role: serializeRole(role, userCount),
-  });
-});
-
-export const deleteRole = asyncHandler(async (req, res) => {
-  assertValidRoleId(req.params.roleId);
-
-  const role = await Role.findById(req.params.roleId);
-
-  if (!role) {
-    throw new AppError("Role not found", 404);
-  }
-
-  if (role.isSystem) {
-    throw new AppError("System roles cannot be deleted", 400);
-  }
-
-  const assignedUsers = await User.countDocuments({ roleId: role._id });
-
-  if (assignedUsers > 0) {
-    throw new AppError(
-      `Reassign ${assignedUsers} user${
-        assignedUsers === 1 ? "" : "s"
-      } before deleting this role`,
-      400
-    );
-  }
-
-  await role.deleteOne();
-
-  res.status(200).json({
-    success: true,
-    message: "Role deleted",
   });
 });
 
@@ -369,6 +357,14 @@ export const getUsers = asyncHandler(async (req, res) => {
     filter.roleId = roleDocument._id;
   }
 
+  // Accounts stay global; ?institutionId= narrows the list to people with a membership in that college.
+  if (req.query.institutionId) {
+    if (!/^[a-f0-9]{24}$/i.test(String(req.query.institutionId))) {
+      throw new AppError("Invalid institutionId", 400);
+    }
+    filter._id = { $in: await InstitutionMembership.distinct("userId", { institutionId: String(req.query.institutionId) }) };
+  }
+
   const [users, total] = await Promise.all([
     User.find(filter)
       .populate("roleId")
@@ -379,9 +375,21 @@ export const getUsers = asyncHandler(async (req, res) => {
     User.countDocuments(filter),
   ]);
 
+  // Each user's colleges (any status), so the global list shows who belongs where.
+  const memberships = await InstitutionMembership.find({ userId: { $in: users.map((user) => user._id) } })
+    .populate("institutionId", "name code")
+    .populate("roleId", "displayName")
+    .select("userId institutionId roleId status")
+    .lean();
+
   res.status(200).json({
     success: true,
-    users: users.map((user) => user.toJSON()),
+    users: users.map((user) => ({
+      ...user.toJSON(),
+      memberships: memberships
+        .filter((membership) => String(membership.userId) === String(user._id) && membership.institutionId)
+        .map(({ _id, institutionId, roleId, status }) => ({ _id, institution: institutionId, role: roleId, status })),
+    })),
     pagination: paginationMeta(page, limit, total),
   });
 });
@@ -397,6 +405,11 @@ export const updateUserRole = asyncHandler(async (req, res) => {
 
   if (!roleDocument) {
     throw new AppError("Role not found", 404);
+  }
+
+  // A college role on the global account would grant its rights at every college.
+  if (roleDocument.scope === "INSTITUTION") {
+    throw new AppError("College roles are assigned through a college membership, not to the account", 400);
   }
 
   const user = await User.findById(req.params.userId);
@@ -426,9 +439,38 @@ export const updateUserRole = asyncHandler(async (req, res) => {
     }
   }
 
+  const previousRoleId = String(user.roleId);
   user.roleId = roleDocument._id;
   await user.save();
   await user.populate(["roleId", "primaryWallet"]);
+  await audit(req, { action: "admin.user.role", targetType: "User", targetId: user._id, summary: `Changed role of ${user.name} to ${roleDocument.name}`, details: { previousRoleId, role: roleDocument.name } });
+
+  res.status(200).json({ success: true, user: user.toJSON() });
+});
+
+// Admin sets the userType label explicitly; it is never derived from roles and grants nothing.
+export const updateUserAccount = asyncHandler(async (req, res) => {
+  const { userType } = req.body;
+
+  if (!USER_TYPES.includes(userType)) {
+    throw new AppError(`userType must be one of ${USER_TYPES.join(", ")}`, 400);
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(req.params.userId)) {
+    throw new AppError("Invalid user id", 400);
+  }
+
+  const user = await User.findById(req.params.userId);
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  const previousUserType = user.userType;
+  user.userType = userType;
+  await user.save();
+  await user.populate(["roleId", "primaryWallet"]);
+  await audit(req, { action: "admin.user.userType", targetType: "User", targetId: user._id, summary: `Changed user type of ${user.name} to ${userType}`, details: { from: previousUserType, to: userType } });
 
   res.status(200).json({ success: true, user: user.toJSON() });
 });
@@ -453,11 +495,12 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
   user.isActive = isActive;
   await user.save();
   await user.populate(["roleId", "primaryWallet"]);
+  await audit(req, { action: "admin.user.status", targetType: "User", targetId: user._id, summary: `${isActive ? "Activated" : "Deactivated"} ${user.name}`, details: { isActive } });
 
   res.status(200).json({ success: true, user: user.toJSON() });
 });
 
-export const getUniversities = asyncHandler(async (req, res) => {
+export const getInstitutions = asyncHandler(async (req, res) => {
   const { page, limit, skip } = getPagination(req.query);
   const { search, status } = req.query;
   const filter = {};
@@ -479,25 +522,25 @@ export const getUniversities = asyncHandler(async (req, res) => {
     filter.verificationStatus = status;
   }
 
-  const [universities, total] = await Promise.all([
-    University.find(filter)
+  const [institutions, total] = await Promise.all([
+    Institution.find(filter)
       .populate("userId", "name email isActive")
       .populate("walletId", "address isVerified")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
-    University.countDocuments(filter),
+    Institution.countDocuments(filter),
   ]);
 
   res.status(200).json({
     success: true,
-    universities,
+    institutions,
     pagination: paginationMeta(page, limit, total),
   });
 });
 
-export const updateUniversityStatus = asyncHandler(async (req, res) => {
-  const { verificationStatus, isActive } = req.body;
+export const updateInstitutionStatus = asyncHandler(async (req, res) => {
+  const { verificationStatus, status } = req.body;
 
   if (!["PENDING", "VERIFIED", "REJECTED"].includes(verificationStatus)) {
     throw new AppError(
@@ -508,26 +551,31 @@ export const updateUniversityStatus = asyncHandler(async (req, res) => {
 
   const update = { verificationStatus };
 
-  if (typeof isActive === "boolean") {
-    update.isActive = isActive;
+  if (status !== undefined) {
+    if (!INSTITUTION_STATUSES.includes(status)) {
+      throw new AppError(`status must be one of ${INSTITUTION_STATUSES.join(", ")}`, 400);
+    }
+    update.status = status;
   }
 
-  const university = await University.findByIdAndUpdate(
-    req.params.universityId,
+  const institution = await Institution.findByIdAndUpdate(
+    req.params.institutionId,
     update,
     { new: true, runValidators: true }
   )
     .populate("userId", "name email isActive")
     .populate("walletId", "address isVerified");
 
-  if (!university) {
-    throw new AppError("University not found", 404);
+  if (!institution) {
+    throw new AppError("Institution not found", 404);
   }
 
-  res.status(200).json({ success: true, university });
+  await audit(req, { action: "admin.institution.status", institutionId: institution._id, targetType: "Institution", targetId: institution._id, summary: `Set ${institution.name} to ${update.verificationStatus}${update.status ? ` / ${update.status}` : ""}`, details: update });
+
+  res.status(200).json({ success: true, institution });
 });
 
-export const getNftAllocations = asyncHandler(async (req, res) => {
+export const listCredentials = asyncHandler(async (req, res) => {
   const { page, limit, skip } = getPagination(req.query);
   const { search, minted } = req.query;
   const filter = {};
@@ -538,7 +586,7 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
       { name: regex },
       { ipfsHash: regex },
       { studentWallet: regex },
-      { universityWallet: regex },
+      { institutionWallet: regex },
       { nftAddress: regex },
     ];
   }
@@ -547,19 +595,57 @@ export const getNftAllocations = asyncHandler(async (req, res) => {
     filter.minted = minted === "true";
   }
 
-  const [allocations, total] = await Promise.all([
-    NFT.find(filter)
-      .populate("universityId", "name code")
-      .populate("studentId", "name email")
+  const [credentials, total] = await Promise.all([
+    Credential.find(filter)
+      .populate("institutionId", "name code")
+      .populate("userId", "name email")
       .sort({ allocatedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit),
-    NFT.countDocuments(filter),
+    Credential.countDocuments(filter),
   ]);
 
   res.status(200).json({
     success: true,
-    allocations,
+    credentials,
+    pagination: paginationMeta(page, limit, total),
+  });
+});
+
+// Activity log. `type` is a scope (PLATFORM / INSTITUTION / ACCOUNT) or FAILURE for rejected attempts;
+// `method` is POST / PUT / PATCH / DELETE. `stats` always covers the whole log, not the current filter.
+export const getAuditLogs = asyncHandler(async (req, res) => {
+  res.status(200).json({ success: true, ...(await listAuditLogs(req)) });
+});
+
+export const getApplications = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = getPagination(req.query);
+  const { status, search } = req.query;
+  const filter = {};
+
+  if (["PENDING", "APPROVED", "REJECTED"].includes(status)) {
+    filter.status = status;
+  }
+
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+    filter.$or = [{ name: regex }, { code: regex }, { email: regex }, { contactName: regex }];
+  }
+
+  const [applications, total] = await Promise.all([
+    InstitutionApplication.find(filter)
+      .populate("linkId", "label")
+      .populate("reviewedBy", "name")
+      .populate("institutionId", "name code status")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    InstitutionApplication.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    applications,
     pagination: paginationMeta(page, limit, total),
   });
 });
@@ -576,18 +662,18 @@ export const getReports = asyncHandler(async (req, res) => {
   if (search) {
     const regex = new RegExp(escapeRegex(search), "i");
     filter.$or = [
-      { nftIpfsHash: regex },
+      { ipfsHash: regex },
       { reportType: regex },
       { reportDetails: regex },
       { studentWallet: regex },
-      { universityWallet: regex },
+      { institutionWallet: regex },
     ];
   }
 
   const [reports, total] = await Promise.all([
     Reports.find(filter)
-      .populate("universityId", "name code")
-      .populate("studentId", "name email")
+      .populate("institutionId", "name code")
+      .populate("userId", "name email")
       .sort({ reportedOn: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -618,10 +704,42 @@ export const resolveReport = asyncHandler(async (req, res) => {
   report.solutionDetails = String(solutionDetails).trim();
   report.resolvedDate = new Date();
   await report.save();
+  await audit(req, { action: "admin.report.resolve", institutionId: report.institutionId, targetType: "Report", targetId: report._id, summary: `Resolved report: ${report.reportType}` });
   await report.populate([
-    { path: "universityId", select: "name code" },
-    { path: "studentId", select: "name email" },
+    { path: "institutionId", select: "name code" },
+    { path: "userId", select: "name email" },
   ]);
 
   res.status(200).json({ success: true, report });
+});
+
+// P04-04: Super Admin manages any college's members, including admin roles and the primary head.
+const loadInstitution = async (institutionId) => {
+  if (!/^[a-f0-9]{24}$/i.test(String(institutionId || ""))) {
+    throw new AppError("Invalid institutionId", 400);
+  }
+  const institution = await Institution.findById(institutionId);
+  if (!institution) throw new AppError("Institution not found", 404);
+  return institution;
+};
+
+export const getInstitutionMembers = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  res.status(200).json({ success: true, ...(await staffService.listMembers(institution, { asSuperAdmin: true })) });
+});
+
+export const inviteInstitutionMember = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  res.status(201).json({ success: true, ...(await staffService.inviteMember(req, institution, req.body, { asSuperAdmin: true })) });
+});
+
+export const updateInstitutionMember = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  const membership = await staffService.updateMember(req, institution, req.params.membershipId, req.body, { asSuperAdmin: true });
+  res.status(200).json({ success: true, membership });
+});
+
+export const transferInstitutionHead = asyncHandler(async (req, res) => {
+  const institution = await loadInstitution(req.params.institutionId);
+  res.status(200).json({ success: true, institution: await staffService.transferHead(req, institution, req.body) });
 });
