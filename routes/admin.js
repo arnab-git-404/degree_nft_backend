@@ -16,6 +16,8 @@ router.put("/settings/smtp", settingsController.updateSmtpSettings);
 router.post("/settings/smtp/test", settingsController.testSmtpSettings);
 router.get("/settings/billing", chainController.getBillingSettings);
 router.put("/settings/billing", chainController.updateBillingSettings);
+router.get("/settings/compression", settingsController.getCompressionSettings);
+router.put("/settings/compression", settingsController.updateCompressionSettings);
 
 router.get("/permissions", adminController.getPermissionCatalog);
 router.get("/roles", adminController.getRoles);

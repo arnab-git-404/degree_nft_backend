@@ -1716,6 +1716,31 @@ describe("baseline smoke", { skip: !process.env.MONGODB_URI && "MONGODB_URI not 
     });
   });
 
+  describe("platform gzip level", () => {
+    let saved;
+
+    before(async () => {
+      saved = await PlatformSetting.collection.findOne({ key: "platform" });
+    });
+
+    after(async () => {
+      await PlatformSetting.collection.deleteOne({ key: "platform" });
+      if (saved) await PlatformSetting.collection.insertOne(saved);
+    });
+
+    test("only platform admins can change it, only to 1–9, and it is saved", async () => {
+      const staff = await makeUser("institution");
+      const admin = await makeUser("admin");
+      assert.equal((await call("PUT", "/admin/settings/compression", { token: staff.token, body: { gzipLevel: 1 } })).status, 403);
+      for (const gzipLevel of [0, 10, 4.5, "fast", null]) {
+        assert.equal((await call("PUT", "/admin/settings/compression", { token: admin.token, body: { gzipLevel } })).status, 400);
+      }
+      const saved = await call("PUT", "/admin/settings/compression", { token: admin.token, body: { gzipLevel: 9 } });
+      assert.equal(saved.status, 200, JSON.stringify(saved.body));
+      assert.equal((await call("GET", "/admin/settings/compression", { token: admin.token })).body.gzipLevel, 9);
+    });
+  });
+
   describe("no self-promotion (P00-04)", () => {
     test("no account can create a college by itself; the self-serve endpoint is gone (P03-06)", async () => {
       for (const roleName of ["student", "institution", "admin"]) {

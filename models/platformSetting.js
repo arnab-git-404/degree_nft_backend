@@ -25,6 +25,10 @@ const PlatformSettingSchema = new mongoose.Schema(
       priceSol: { type: Number, min: 1 },
       priceUsdc: { type: Number, min: 1 },
     },
+    // gzip level for API responses: 1 = fastest, 9 = smallest. 6 is zlib's default.
+    performance: {
+      gzipLevel: { type: Number, min: 1, max: 9, default: 6 },
+    },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }

@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import { gzip } from "./middleware/compression.js";
 import apiRoutes from "./routes/api.js";
 import { notFound, errorHandler } from "./middleware/errorHandler.js";
 
@@ -28,6 +29,7 @@ app.use(
   }),
 );
 
+app.use(gzip);
 app.use(express.json());
 
 // The API's home page (also the uptime check: it always answers 200).

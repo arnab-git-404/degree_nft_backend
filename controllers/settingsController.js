@@ -4,6 +4,7 @@ import { encryptSecret } from "../utils/secretBox.js";
 import { audit } from "../utils/audit.js";
 import AppError from "../utils/AppError.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import { DEFAULT_GZIP_LEVEL, setGzipLevel } from "../middleware/compression.js";
 
 const SMTP_PORTS = [25, 465, 587, 2525];
 const HOST_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i;
@@ -116,4 +117,33 @@ export const testSmtpSettings = asyncHandler(async (req, res) => {
 
   if (error) throw new AppError(`SMTP test failed: ${error}`, 502);
   res.status(200).json({ success: true, message: `Test email sent to ${to}` });
+});
+
+export const getCompressionSettings = asyncHandler(async (req, res) => {
+  const settings = await PlatformSetting.findOne({ key: "platform" }).select("performance").lean();
+  res.status(200).json({ success: true, gzipLevel: settings?.performance?.gzipLevel || DEFAULT_GZIP_LEVEL });
+});
+
+export const updateCompressionSettings = asyncHandler(async (req, res) => {
+  const gzipLevel = Number(req.body?.gzipLevel);
+  if (!Number.isInteger(gzipLevel) || gzipLevel < 1 || gzipLevel > 9) {
+    throw new AppError("gzipLevel must be a whole number from 1 to 9", 400);
+  }
+
+  const settings = (await PlatformSetting.findOne({ key: "platform" })) || new PlatformSetting({ key: "platform" });
+  const before = settings.performance?.gzipLevel ?? DEFAULT_GZIP_LEVEL;
+  settings.performance = { gzipLevel };
+  settings.updatedBy = req.user._id;
+  await settings.save();
+  setGzipLevel(gzipLevel);
+
+  await audit(req, {
+    action: "admin.settings.compression.update",
+    targetType: "PlatformSetting",
+    targetId: settings._id,
+    summary: `Set the gzip level from ${before} to ${gzipLevel}`,
+    details: { before, after: gzipLevel },
+  });
+
+  res.status(200).json({ success: true, gzipLevel });
 });
